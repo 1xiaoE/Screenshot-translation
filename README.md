@@ -4,23 +4,6 @@
 
 项目目录已改名为 `Screenshot translation`（注意目录名中的空格）。
 
-直接运行（打开设置，不会立刻弹出截图框）：
-
-```bash
-python3 "/home/eternal/Desktop/tools/Screenshot translation/screenshot_translator.py"
-```
-
-重新框选：
-
-```bash
-python3 "/home/eternal/Desktop/tools/Screenshot translation/screenshot_translator.py" --select
-```
-
-快捷键设置：
-
-```bash
-python3 "/home/eternal/Desktop/tools/Screenshot translation/screenshot_translator.py" --settings
-```
 
 依赖：GTK3/PyGObject、Pillow、Tesseract。中文 OCR 模型和英文模型放在 `tessdata/`。翻译后端使用开源 Mozhi 的 DuckDuckGo 引擎（`GET /api/translate`，query 传参），并带三个备用节点，每段最多尝试 3 次。可用环境变量 `MOZHI_NODES`（逗号分隔）覆盖节点列表。
 
