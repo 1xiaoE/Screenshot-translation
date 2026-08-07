@@ -10,11 +10,8 @@
 - 按 OCR 块和段落组织文字，而不是逐词翻译
 - 译文按原图列和段落位置排版，自动换行并检测碰撞
 - 全图使用统一字号；空间不足时统一从 18 调整到 16 或 14 像素
-- 短段落合并为一次网络请求，降低翻译延迟
-- 论文摘要等长段落按句子拆分并行翻译，再自动合并
-- 自动修复 PDF 常见的行末断词，例如 `demon-` 换行接 `strated`
-- 自动读取 GNOME 手动代理，可直接使用 Clash Verge 等本地代理
-- 翻译缓存、节点回退、进度提示和单任务锁
+- 每个段落一次翻译请求；节点与引擎回退，单段最多尝试 4 次
+- 翻译缓存、进度提示和单任务锁
 - 支持提取中文、提取英文、复制译文和重新框选
 
 ## 运行环境
@@ -77,12 +74,6 @@ Ctrl+Alt+O
 python3 screenshot_translator.py --select
 ```
 
-截取上次保存的固定区域：
-
-```bash
-python3 screenshot_translator.py --capture
-```
-
 ## 使用流程
 
 ```text
@@ -97,9 +88,15 @@ python3 screenshot_translator.py --capture
 - 快捷键设置
 - 复制翻译
 
-## 网络与代理
+## 网络与翻译
 
-翻译后端默认使用公共 Mozhi 实例的 DuckDuckGo/Bing 引擎。程序会依次尝试以下节点：
+翻译后端使用公共 Mozhi 实例的 `GET /api/translate` 接口，参数通过 query 传递（不要使用 POST，三个公共节点对 POST 都返回 HTTP 500）。引擎按顺序尝试：
+
+```text
+duckduckgo → bing → google
+```
+
+节点依次尝试：
 
 ```text
 https://translate.projectsegfau.lt
@@ -107,16 +104,9 @@ https://mozhi.adminforge.de
 https://mozhi.ducks.party
 ```
 
-程序会自动读取 GNOME“网络代理”中的手动 HTTP/HTTPS 代理。例如 Clash Verge 使用 `127.0.0.1:7897` 时，无需额外修改代码。
+每个段落独立翻译，单段总尝试次数最多 4 次；某个节点连接失败时快速切换到下一个节点。部分段落失败时保留原文并继续渲染，全部失败才弹出提示。
 
-也可以显式指定代理：
-
-```bash
-SCREENSHOT_TRANSLATOR_PROXY=http://127.0.0.1:7897 \
-  python3 screenshot_translator.py --select
-```
-
-自定义 Mozhi 节点：
+可用环境变量 `MOZHI_NODES`（逗号分隔）覆盖节点列表：
 
 ```bash
 MOZHI_NODES=https://example-one.invalid,https://example-two.invalid \
@@ -125,9 +115,7 @@ MOZHI_NODES=https://example-one.invalid,https://example-two.invalid \
 
 ## 翻译与排版策略
 
-OCR 文字首先按 `block_num + par_num` 合并为段落。短段落会在不超过接口长度限制的前提下合并请求，并使用内部标记拆回对应位置。
-
-超过约 650 字符的长段落会按句号、问号、分号或单词边界拆分，并行翻译后重新组成一个段落。这可以避免 Mozhi/Bing 因单次 GET 文本过长返回 HTTP 500。
+OCR 文字首先按 `block_num + par_num` 合并为段落，再以段落为单位翻译。
 
 排版时会：
 
@@ -190,14 +178,8 @@ x11
 ### 翻译服务无法连接
 
 1. 确认网络或 Clash Verge 正常运行；
-2. 检查 GNOME 网络代理；
-3. 查看 `screenshot_translator.log`；
-4. 使用 `SCREENSHOT_TRANSLATOR_PROXY` 显式指定代理；
-5. 必要时通过 `MOZHI_NODES` 更换节点。
-
-### 论文长段落返回 HTTP 500
-
-当前版本会自动拆分超过约 650 字符的段落。若仍出现问题，请检查是否正在运行最新代码，并查看日志中的时间戳。
+2. 查看 `screenshot_translator.log`；
+3. 必要时通过 `MOZHI_NODES` 更换节点。
 
 ## 项目结构
 
