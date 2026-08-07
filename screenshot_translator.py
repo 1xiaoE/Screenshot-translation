@@ -54,6 +54,7 @@ FONT_STEP = 2
 BOX_GAP = 4            # minimum px gap between translation boxes
 PAD_H, PAD_V = 6, 4    # inner padding of a translation box
 OCR_PSM = "3"          # automatic segmentation keeps separate columns as blocks
+OCR_SCALE = 2          # raise small glyphs above Tesseract's minimum x-height
 
 # Mozhi endpoint is GET /api/translate with query params (POST returns HTTP 500).
 DEFAULT_NODES = [
@@ -219,30 +220,80 @@ def capture(rect, pix=None):
 # OCR -> paragraphs
 # ---------------------------------------------------------------------------
 
+def _run_tesseract(path, lang, psm, output=None):
+    """Run one OCR pass on a 2x image and return decoded stdout."""
+    with Image.open(path) as source:
+        resized = source.convert("RGB").resize(
+            (source.width * OCR_SCALE, source.height * OCR_SCALE),
+            Image.LANCZOS,
+        )
+    encoded = io.BytesIO()
+    resized.save(encoded, "PNG", dpi=(300, 300))
+    resized.close()
+
+    env = os.environ.copy()
+    env["TESSDATA_PREFIX"] = str(TESSDATA)
+    cmd = ["tesseract", "stdin", "stdout", "--psm", str(psm), "-l", lang]
+    if output:
+        cmd.append(output)
+    proc = subprocess.run(cmd, input=encoded.getvalue(), stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, env=env, timeout=25)
+    proc.check_returncode()
+    return proc.stdout.decode("utf-8", errors="replace")
+
+
+_NO_SPACE_BEFORE = set(",.!?;:%)]}，。！？；：、）》】」』”’")
+_NO_SPACE_AFTER = set("([{（《【「『，。！？；：、“‘$£¥￥")
+
+
+def _is_cjk(char):
+    return unicodedata.east_asian_width(char) in ("W", "F")
+
+
+def _join_ocr_tokens(tokens):
+    """Join OCR fragments without adding spaces around CJK or punctuation."""
+    joined = ""
+    for token in (str(token).strip() for token in tokens):
+        if not token:
+            continue
+        if (joined and not (_is_cjk(joined[-1]) or _is_cjk(token[0]) or
+                            token[0] in _NO_SPACE_BEFORE or
+                            joined[-1] in _NO_SPACE_AFTER)):
+            joined += " "
+        joined += token
+    return joined
+
+
 def parse_ocr_paragraphs(path, lang="eng+chi_sim"):
     """Run tesseract TSV and group words into paragraphs by block_num+par_num.
 
     Each paragraph gets its overall bounding box and multi-line text.  Columns
     survive because --psm 3 gives distinct block_num to separate text blocks.
     """
-    env = os.environ.copy()
-    env["TESSDATA_PREFIX"] = str(TESSDATA)
-    cmd = ["tesseract", str(path), "stdout", "--psm", OCR_PSM, "-l", lang, "tsv"]
-    proc = subprocess.run(cmd, text=True, stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, env=env, timeout=25)
+    tsv = _run_tesseract(path, lang, OCR_PSM, "tsv")
+    rows = list(csv.DictReader(io.StringIO(tsv), delimiter="\t"))
+    try:
+        page_height = int(rows[0]["height"])
+    except (IndexError, KeyError, ValueError):
+        page_height = 0
     words = []
-    for row in csv.DictReader(io.StringIO(proc.stdout), delimiter="\t"):
+    for row in rows:
         try:
             text = row["text"].strip()
             conf = float(row["conf"])
+            left, top = int(row["left"]), int(row["top"])
+            width, height = int(row["width"]), int(row["height"])
             if not text or conf < 18:
+                continue
+            if (text in {"|", "/", "1", "I", "l"} and
+                    left == 0 and top == 0 and page_height and
+                    height >= page_height * 0.8 and width * 2 < height):
                 continue
             words.append({
                 "block_num": int(row["block_num"]),
                 "par_num": int(row["par_num"]),
                 "line_num": int(row["line_num"]),
-                "left": int(row["left"]), "top": int(row["top"]),
-                "width": int(row["width"]), "height": int(row["height"]),
+                "left": left, "top": top, "width": width, "height": height,
                 "text": text,
             })
         except (ValueError, KeyError):
@@ -257,7 +308,7 @@ def parse_ocr_paragraphs(path, lang="eng+chi_sim"):
         ws.sort(key=lambda w: w["left"])
         line_items.append({
             "block_num": block_num, "par_num": par_num,
-            "text": " ".join(w["text"] for w in ws),
+            "text": _join_ocr_tokens(w["text"] for w in ws),
             "left": min(w["left"] for w in ws),
             "top": min(w["top"] for w in ws),
             "right": max(w["left"] + w["width"] for w in ws),
@@ -275,9 +326,14 @@ def parse_ocr_paragraphs(path, lang="eng+chi_sim"):
         top = min(l["top"] for l in lis)
         right = max(l["right"] for l in lis)
         bottom = max(l["bottom"] for l in lis)
+        source_left = left // OCR_SCALE
+        source_top = top // OCR_SCALE
+        source_right = (right + OCR_SCALE - 1) // OCR_SCALE
+        source_bottom = (bottom + OCR_SCALE - 1) // OCR_SCALE
         paragraphs.append({
             "text": "\n".join(l["text"] for l in lis),
-            "box": (left, top, right - left, bottom - top),
+            "box": (source_left, source_top,
+                    source_right - source_left, source_bottom - source_top),
         })
     paragraphs.sort(key=lambda p: (p["box"][1], p["box"][0]))
     return paragraphs
@@ -340,7 +396,7 @@ def _translate_remote(text):
 def _clean_ocr_text(text):
     """Undo PDF line wrapping before sending OCR text for translation."""
     text = re.sub(r"(?<=\w)-\s*\n\s*(?=\w)", "", text)
-    return re.sub(r"\s*\n\s*", " ", text).strip()
+    return _join_ocr_tokens(re.split(r"[ \t]*\n[ \t]*", text))
 
 
 def _split_translation_chunks(text, limit=MAX_BATCH_CHARS):
@@ -513,10 +569,6 @@ def font(size, bold=False):
         return ImageFont.truetype(FONT_BOLD if bold else FONT, max(MIN_FONT_SIZE, size))
     except Exception:
         return ImageFont.load_default()
-
-
-def _is_cjk(ch):
-    return unicodedata.east_asian_width(ch) in ("W", "F")
 
 
 def wrap_text_by_pixels(text, font, max_width, draw):
@@ -1031,10 +1083,7 @@ def show_busy_dialog():
 
 
 def run_extract(lang):
-    env = os.environ.copy()
-    env["TESSDATA_PREFIX"] = str(TESSDATA)
-    return subprocess.run(["tesseract", str(CACHE), "stdout", "--psm", "6", "-l", lang],
-                          env=env, text=True, stdout=subprocess.PIPE, timeout=25).stdout.strip()
+    return _run_tesseract(CACHE, lang, "6").strip()
 
 
 KEYBINDING_PATH = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/screenshot-translator/"
