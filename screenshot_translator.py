@@ -18,15 +18,19 @@ import fcntl
 import io
 import json
 import logging
+import math
 import os
+import queue
 import re
 import shlex
 import subprocess
 import sys
 import threading
+import time
 import unicodedata
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, as_completed
 from pathlib import Path
+from urllib.parse import urlencode
 
 import requests
 from PIL import Image, ImageDraw, ImageFont
@@ -55,23 +59,43 @@ BOX_GAP = 4            # minimum px gap between translation boxes
 PAD_H, PAD_V = 6, 4    # inner padding of a translation box
 OCR_PSM = "3"          # automatic segmentation keeps separate columns as blocks
 OCR_SCALE = 2          # raise small glyphs above Tesseract's minimum x-height
+OCR_MAX_PIXELS = 5_000_000   # cap on the upscaled image area fed to Tesseract
+
+
+def _ocr_scale_for(width, height):
+    """Adaptive upscale factor: 2x for small regions (small text), tapering
+    toward 1x for huge regions so a full-screen selection does not feed
+    Tesseract a 5120x2880 image (a ~7s OCR pass)."""
+    area = width * height
+    if area <= 0:
+        return OCR_SCALE
+    return min(OCR_SCALE, math.sqrt(OCR_MAX_PIXELS / area))
 
 # Mozhi endpoint is GET /api/translate with query params (POST returns HTTP 500).
+# The order matters only for the very first request: after the first success the
+# working node is promoted to the front (_ordered_nodes), so a dead first node
+# stops stalling every translation.
 DEFAULT_NODES = [
-    "https://translate.projectsegfau.lt",
     "https://mozhi.adminforge.de",
     "https://mozhi.ducks.party",
+    "https://translate.projectsegfau.lt",
 ]
 # allow overriding the node list for testing/firewalls: MOZHI_NODES=a,b,c
 _env_nodes = os.environ.get("MOZHI_NODES", "").strip()
 NODES = [n.strip() for n in _env_nodes.split(",") if n.strip()] if _env_nodes else DEFAULT_NODES
-# DuckDuckGo is backed by Bing in Mozhi and is the endpoint verified against
-# all configured instances. Trying extra engines after a network failure only
-# makes an interactive screenshot wait longer.
-ENGINES = ["duckduckgo"]
+# DuckDuckGo (Bing-backed) is the primary engine; google is tried on the same
+# node when duckduckgo returns an HTTP error or an empty result (never on
+# network failures).  google needs "zh-CN" while duckduckgo accepts "zh".
+ENGINES = ["duckduckgo", "google"]
+ENGINE_TARGET = {"duckduckgo": "zh", "google": "zh-CN"}
 MAX_TRANSLATE_WORKERS = 3
-MAX_ATTEMPTS_PER_PARAGRAPH = 3
-MAX_BATCH_CHARS = 650
+MAX_ATTEMPTS_PER_PARAGRAPH = len(NODES) * len(ENGINES)
+# One GET query per batch: Bing itself rejects ~>1000 chars (HTTP 500), and the
+# reverse proxies in front of the public nodes reject long URLs (HTTP 431/414),
+# which hits CJK text especially hard (each CJK char is ~9 percent-encoded
+# bytes).  Size batches by BOTH raw chars and percent-encoded URL length.
+BATCH_MAX_CHARS = 950
+BATCH_MAX_URL = 3500
 
 logging.basicConfig(filename=str(LOG_FILE), level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s")
@@ -114,6 +138,50 @@ if DESKTOP_PROXY:
 # thread-local session per worker as requested instead of a shared object.
 _tls = threading.local()
 
+# Persistent worker pools: the threads (and their thread-local HTTP sessions)
+# stay alive between screenshots, so the multi-second TLS handshake through the
+# desktop proxy happens once per thread per launch, not once per batch.  The
+# chunk pool is separate from the batch pool so a paragraph split into chunks
+# can never deadlock against the batch workers.
+class _WorkerPool:
+    """Tiny daemon-thread pool that keeps its workers (and their thread-local
+    HTTP sessions) alive across screenshots.
+
+    Daemon threads are used deliberately: concurrent.futures' executor threads
+    are non-daemon and are joined at interpreter shutdown, so quitting the app
+    while a request is in flight would block exit until the socket times out.
+    """
+
+    def __init__(self, workers, name):
+        self._q = queue.Queue()
+        self._threads = [threading.Thread(target=self._run,
+                                          name="%s-%d" % (name, i),
+                                          daemon=True)
+                         for i in range(workers)]
+        for t in self._threads:
+            t.start()
+
+    def _run(self):
+        while True:
+            fn, fut = self._q.get()
+            if fn is None:
+                return
+            try:
+                result = fn()
+            except BaseException as exc:
+                fut.set_exception(exc)
+            else:
+                fut.set_result(result)
+
+    def submit(self, fn, *args):
+        fut = Future()
+        self._q.put((lambda: fn(*args), fut))
+        return fut
+
+
+_translate_executor = _WorkerPool(MAX_TRANSLATE_WORKERS, "translate")
+_chunk_executor = _WorkerPool(MAX_TRANSLATE_WORKERS, "chunk")
+
 
 def _tls_session():
     s = getattr(_tls, "session", None)
@@ -126,8 +194,12 @@ def _tls_session():
     return s
 
 
+CACHE_MAX_ENTRIES = 1000
+CACHE_SAVE_INTERVAL = 0.75   # seconds; cache_set writes at most this often
+
 _cache = {}
 _cache_lock = threading.Lock()
+_cache_last_save = 0.0
 
 
 def load_translation_cache():
@@ -138,6 +210,22 @@ def load_translation_cache():
         _cache = {}
 
 
+def _save_cache_now():
+    """Write the cache to disk; callers must hold ``_cache_lock``."""
+    global _cache_last_save
+    try:
+        CACHE_FILE.write_text(json.dumps(_cache, ensure_ascii=False))
+        _cache_last_save = time.monotonic()
+    except Exception as exc:
+        logging.warning("cache save failed: %s", exc.__class__.__name__)
+
+
+def save_cache():
+    """Flush any debounced cache writes (called when a task completes)."""
+    with _cache_lock:
+        _save_cache_now()
+
+
 def cache_get(text):
     with _cache_lock:
         return _cache.get(text)
@@ -146,13 +234,11 @@ def cache_get(text):
 def cache_set(text, value):
     with _cache_lock:
         _cache[text] = value
-        if len(_cache) > 300:
-            for k in list(_cache)[:len(_cache) - 300]:
+        if len(_cache) > CACHE_MAX_ENTRIES:
+            for k in list(_cache)[:len(_cache) - CACHE_MAX_ENTRIES]:
                 del _cache[k]
-        try:
-            CACHE_FILE.write_text(json.dumps(_cache, ensure_ascii=False))
-        except Exception as exc:
-            logging.warning("cache save failed: %s", exc.__class__.__name__)
+        if time.monotonic() - _cache_last_save > CACHE_SAVE_INTERVAL:
+            _save_cache_now()
 
 
 def acquire_task_lock():
@@ -220,11 +306,18 @@ def capture(rect, pix=None):
 # OCR -> paragraphs
 # ---------------------------------------------------------------------------
 
-def _run_tesseract(path, lang, psm, output=None):
-    """Run one OCR pass on a 2x image and return decoded stdout."""
+def _run_tesseract(path, lang, psm, output=None, scale=None):
+    """Run one OCR pass on a (adaptively) upscaled image, return stdout.
+
+    ``scale`` defaults to ``_ocr_scale_for`` of the source image, so huge
+    selections never blow up to a 2x full-screen bitmap.
+    """
     with Image.open(path) as source:
+        if scale is None:
+            scale = _ocr_scale_for(source.width, source.height)
         resized = source.convert("RGB").resize(
-            (source.width * OCR_SCALE, source.height * OCR_SCALE),
+            (max(1, round(source.width * scale)),
+             max(1, round(source.height * scale))),
             Image.LANCZOS,
         )
     encoded = io.BytesIO()
@@ -269,8 +362,12 @@ def parse_ocr_paragraphs(path, lang="eng+chi_sim"):
 
     Each paragraph gets its overall bounding box and multi-line text.  Columns
     survive because --psm 3 gives distinct block_num to separate text blocks.
+    The same adaptive scale is used for OCR and for mapping boxes back to
+    source coordinates.
     """
-    tsv = _run_tesseract(path, lang, OCR_PSM, "tsv")
+    with Image.open(path) as probe:
+        scale = _ocr_scale_for(probe.width, probe.height)
+    tsv = _run_tesseract(path, lang, OCR_PSM, "tsv", scale=scale)
     rows = list(csv.DictReader(io.StringIO(tsv), delimiter="\t"))
     try:
         page_height = int(rows[0]["height"])
@@ -326,10 +423,10 @@ def parse_ocr_paragraphs(path, lang="eng+chi_sim"):
         top = min(l["top"] for l in lis)
         right = max(l["right"] for l in lis)
         bottom = max(l["bottom"] for l in lis)
-        source_left = left // OCR_SCALE
-        source_top = top // OCR_SCALE
-        source_right = (right + OCR_SCALE - 1) // OCR_SCALE
-        source_bottom = (bottom + OCR_SCALE - 1) // OCR_SCALE
+        source_left = int(left / scale)
+        source_top = int(top / scale)
+        source_right = int(math.ceil(right / scale))
+        source_bottom = int(math.ceil(bottom / scale))
         paragraphs.append({
             "text": "\n".join(l["text"] for l in lis),
             "box": (source_left, source_top,
@@ -347,26 +444,85 @@ class TranslationError(RuntimeError):
     pass
 
 
+# Most recently successful node, promoted to the front of the next request so a
+# dead or slow first node stops stalling every translation.  Written from worker
+# threads; a plain string assignment is atomic under the GIL.
+_last_good_node = None
+
+# Circuit breaker: a node that fails connection-level requests N times in a row
+# is skipped for a cooldown period, so one dead node no longer costs a full
+# connect-timeout on every subsequent request.
+NODE_FAILURES_TO_COOLDOWN = 2
+NODE_COOLDOWN_SECONDS = 30.0
+_node_failures = {}
+_node_cooldown_until = {}
+_node_lock = threading.Lock()
+
+
+def _node_ok(node):
+    with _node_lock:
+        _node_failures.pop(node, None)
+        _node_cooldown_until.pop(node, None)
+
+
+def _node_failed(node):
+    with _node_lock:
+        count = _node_failures.get(node, 0) + 1
+        _node_failures[node] = count
+        if count >= NODE_FAILURES_TO_COOLDOWN:
+            _node_cooldown_until[node] = time.monotonic() + NODE_COOLDOWN_SECONDS
+
+
+def _node_available(node):
+    with _node_lock:
+        return time.monotonic() > _node_cooldown_until.get(node, 0.0)
+
+
+def _ordered_nodes():
+    nodes = [n for n in NODES if _node_available(n)] or list(NODES)
+    if _last_good_node in nodes:
+        return [_last_good_node] + [n for n in nodes if n != _last_good_node]
+    return nodes
+
+
+def _warm_node(node):
+    """Establish the TLS connection through the desktop proxy in the background
+    so the first translation does not pay the multi-second handshake.  Best
+    effort: failures are ignored (the real request retries anyway)."""
+    try:
+        _tls_session().get(node, timeout=(10, 15))
+    except Exception:
+        pass
+
+
 def _translate_remote(text):
     """Translate one string via Mozhi without consulting the local cache.
 
-    Prefers the duckduckgo engine, caps total attempts at 3 per request, and
-    switches node quickly when a node is unreachable.  Returns the translated
-    text or raises TranslationError.  Log lines carry host + engine + exception
-    class only, never the source text or a URL with a query string.
+    Prefers the duckduckgo engine, caps total attempts at ``len(NODES) *
+    len(ENGINES)`` per request, and switches node quickly when a node is
+    unreachable.  Returns the translated text or raises TranslationError.  Log
+    lines carry host + engine + exception class only, never the source text or
+    a URL with a query string.
     """
+    global _last_good_node
     s = _tls_session()
     attempts = 0
-    for node in NODES:
+    for node in _ordered_nodes():
         for engine in ENGINES:
             attempts += 1
             if attempts > MAX_ATTEMPTS_PER_PARAGRAPH:
                 raise TranslationError("attempts exhausted")
             try:
+                # The desktop proxy (Clash) adds several seconds to the TLS
+                # handshake; a 2 s connect timeout aborts the handshake as a
+                # ProxyError and makes every node look unreachable.  Use
+                # generous timeouts so slow-but-working nodes succeed.
                 response = s.get(
                     node + "/api/translate",
-                    params={"from": "auto", "to": "zh", "engine": engine, "text": text},
-                    timeout=(2, 8),
+                    params={"from": "auto",
+                            "to": ENGINE_TARGET.get(engine, "zh"),
+                            "engine": engine, "text": text},
+                    timeout=(10, 25),
                 )
                 if response.status_code == 200:
                     data = response.json()
@@ -374,6 +530,8 @@ def _translate_remote(text):
                              or data.get("translation")
                              or data.get("translatedText"))
                     if value:
+                        _last_good_node = node
+                        _node_ok(node)
                         return value
                     logging.warning("translate empty node=%s engine=%s", node, engine)
                 else:
@@ -384,8 +542,10 @@ def _translate_remote(text):
                                 node, engine, exc.__class__.__name__)
                 if isinstance(exc, (requests.exceptions.ConnectTimeout,
                                     requests.exceptions.ConnectionError,
-                                    requests.exceptions.ReadTimeout)):
+                                    requests.exceptions.ReadTimeout,
+                                    requests.exceptions.SSLError)):
                     # node unreachable/slow: switch node instead of burning tries
+                    _node_failed(node)
                     break
             except Exception as exc:
                 logging.warning("translate error node=%s engine=%s exc=%s",
@@ -399,20 +559,46 @@ def _clean_ocr_text(text):
     return _join_ocr_tokens(re.split(r"[ \t]*\n[ \t]*", text))
 
 
-def _split_translation_chunks(text, limit=MAX_BATCH_CHARS):
-    """Split long prose near sentence/word boundaries under the API limit."""
+def _encoded_len(text):
+    """Percent-encoded URL length of a query value (requests' encoding)."""
+    return len(urlencode({"text": text}))
+
+
+def _fits_batch(text):
+    """True when ``text`` fits one GET request (Bing char limit + URL limit)."""
+    return (len(text) <= BATCH_MAX_CHARS
+            and _encoded_len(text) + 20 <= BATCH_MAX_URL)
+
+
+def _max_fit_len(text, cap):
+    """Largest prefix length of ``text`` that still fits one request."""
+    lo, hi = 0, min(cap, len(text))
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if _fits_batch(text[:mid]):
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
+def _split_translation_chunks(text):
+    """Split long prose near sentence/word boundaries under the API limits."""
     text = _clean_ocr_text(text)
+    if _fits_batch(text):
+        return [text]
     chunks = []
-    while len(text) > limit:
-        window = text[:limit + 1]
+    while text and not _fits_batch(text):
+        max_fit = _max_fit_len(text, BATCH_MAX_CHARS)
+        window = text[:max_fit + 1]
         cuts = [window.rfind(token) for token in (". ", "? ", "! ", "; ", ": ")]
         cut = max(cuts)
-        if cut >= limit // 2:
-            cut += 1  # keep sentence punctuation in the preceding chunk
-        else:
+        if cut < max_fit // 2:
             cut = window.rfind(" ")
-            if cut < limit // 2:
-                cut = limit
+            if cut < max_fit // 2:
+                cut = max_fit
+        if cut <= 0:
+            cut = max(1, max_fit)
         chunk = text[:cut].strip()
         if chunk:
             chunks.append(chunk)
@@ -431,14 +617,18 @@ def translate_paragraph(text):
         value = _translate_remote(chunks[0])
     else:
         translated = [None] * len(chunks)
-        with ThreadPoolExecutor(max_workers=min(MAX_TRANSLATE_WORKERS, len(chunks))) as pool:
-            futures = {pool.submit(_translate_remote, chunk): i
-                       for i, chunk in enumerate(chunks)}
-            for future in as_completed(futures):
-                translated[futures[future]] = future.result()
+        futures = {_chunk_executor.submit(_translate_remote, chunk): i
+                   for i, chunk in enumerate(chunks)}
+        for future in as_completed(futures):
+            translated[futures[future]] = future.result()
         value = " ".join(translated)
     cache_set(text, value)
     return value
+
+
+def _batch_item_size(text):
+    """Approx URL size of one batched paragraph, including its marker prefix."""
+    return _encoded_len("ZXQPX0ZX " + _clean_ocr_text(text))
 
 
 def _make_batches(pending, texts):
@@ -446,8 +636,8 @@ def _make_batches(pending, texts):
     current = []
     current_size = 0
     for index in pending:
-        item_size = len(_clean_ocr_text(texts[index])) + 24
-        if current and current_size + item_size > MAX_BATCH_CHARS:
+        item_size = _batch_item_size(texts[index])
+        if current and current_size + item_size > BATCH_MAX_URL:
             batches.append(current)
             current = []
             current_size = 0
@@ -506,38 +696,39 @@ def translate_paragraphs(texts, on_progress=None):
             results[i] = cached
             progress()
 
-    # One oversized OCR paragraph must be split into sentence-sized requests;
-    # never send it as a single GET query (Mozhi/Bing returns HTTP 500).
+    # An oversized OCR paragraph (too many chars or too long a URL when
+    # encoded) must be split into sentence-sized requests; never send it as a
+    # single GET query (Mozhi/Bing returns HTTP 500, proxies return 431/414).
     unresolved = [i for i in pending
-                  if len(_clean_ocr_text(texts[i])) > MAX_BATCH_CHARS]
+                  if not _fits_batch(_clean_ocr_text(texts[i]))]
     unresolved_set = set(unresolved)
     short_pending = [i for i in pending if i not in unresolved_set]
     batches = _make_batches(short_pending, texts)
     if batches:
-        with ThreadPoolExecutor(max_workers=min(MAX_TRANSLATE_WORKERS, len(batches))) as pool:
-            futures = {pool.submit(_translate_batch, batch, texts): batch for batch in batches}
-            for future in as_completed(futures):
-                batch = futures[future]
-                try:
-                    values = future.result()
-                except Exception as exc:
-                    logging.warning("batch translation failed: %s", exc.__class__.__name__)
-                    # If all nodes were already tried, repeating the same
-                    # outage once per paragraph only makes the UI wait.  A
-                    # marker/format problem can still benefit from individual
-                    # fallback requests.
-                    if isinstance(exc, TranslationError) and str(exc) in (
-                            "all translation services unavailable",
-                            "attempts exhausted"):
-                        for _ in batch:
-                            progress()
-                    else:
-                        unresolved.extend(batch)
-                    continue
-                for i in batch:
-                    results[i] = values[i]
-                    cache_set(texts[i], values[i])
-                    progress()
+        futures = {_translate_executor.submit(_translate_batch, batch, texts): batch
+                   for batch in batches}
+        for future in as_completed(futures):
+            batch = futures[future]
+            try:
+                values = future.result()
+            except Exception as exc:
+                logging.warning("batch translation failed: %s", exc.__class__.__name__)
+                # If all nodes were already tried, repeating the same
+                # outage once per paragraph only makes the UI wait.  A
+                # marker/format problem can still benefit from individual
+                # fallback requests.
+                if isinstance(exc, TranslationError) and str(exc) in (
+                        "all translation services unavailable",
+                        "attempts exhausted"):
+                    for _ in batch:
+                        progress()
+                else:
+                    unresolved.extend(batch)
+                continue
+            for i in batch:
+                results[i] = values[i]
+                cache_set(texts[i], values[i])
+                progress()
 
     def work(i, text):
         try:
@@ -547,12 +738,11 @@ def translate_paragraphs(texts, on_progress=None):
             return i, None
 
     if unresolved:
-        with ThreadPoolExecutor(max_workers=MAX_TRANSLATE_WORKERS) as pool:
-            futures = [pool.submit(work, i, texts[i]) for i in unresolved]
-            for future in as_completed(futures):
-                i, value = future.result()
-                results[i] = value
-                progress()
+        futures = [_translate_executor.submit(work, i, texts[i]) for i in unresolved]
+        for future in as_completed(futures):
+            i, value = future.result()
+            results[i] = value
+            progress()
     return results
 
 
@@ -724,9 +914,12 @@ def place_paragraphs(paragraphs, translated, font_size, canvas, grow=False):
         x, y, ow, oh = para["box"]
         out_text = (translated[i] or para["text"]).strip()
         # cap width to the column's horizontal extent so the box never drifts
-        # across a column boundary; also fit the canvas.
+        # across a column boundary, and never beyond what the canvas box can
+        # hold: otherwise box_w is clamped to img_w below while the lines were
+        # wrapped to a larger max_text_width, and validate_layout rejects the
+        # horizontally-clipped result.
         avail_w = max(40, min(img_w - x - PAD_H, col_right[i] - x - PAD_H))
-        max_text_width = min(max(ow, 100), avail_w)
+        max_text_width = min(max(ow, 100), avail_w, img_w - 2 * PAD_H)
         lines = wrap_text_by_pixels(out_text, f, max_text_width, probe)
         content_h = line_h * len(lines)
         box_w = min(max_text_width + 2 * PAD_H, img_w)
@@ -1220,6 +1413,7 @@ def process(rect, pix=None, progress=None, lock=None):
                 GLib.idle_add(lambda: progress.set_text("正在翻译 %d/%d……" % (done, total_count)) or False)
 
         results = translate_paragraphs(texts, on_translate_progress)
+        save_cache()
         if progress is not None and progress.is_cancelled():
             return
 
@@ -1259,6 +1453,12 @@ def main():
     if lock is None:
         show_busy_dialog()
         return
+
+    # Warm the persistent HTTP sessions in the background so the first
+    # translation does not pay the multi-second TLS handshake through the
+    # desktop proxy while the user is still selecting a region.
+    for node in _ordered_nodes()[:MAX_TRANSLATE_WORKERS]:
+        _translate_executor.submit(_warm_node, node)
 
     state = load_state()
     forced = mode == "--select"
