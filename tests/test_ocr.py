@@ -102,6 +102,93 @@ class OcrTest(unittest.TestCase):
             "translation 中文断行",
         )
 
+    def test_repairs_pdf_ligatures_and_soft_hyphen_wraps(self):
+        self.assertEqual(app._clean_ocr_text("Ef\ufb01cient reinforce\u00ad\nment"),
+                         "Efficient reinforcement")
+
+    def test_preserves_clear_hyphenated_compounds(self):
+        self.assertEqual(
+            app._clean_ocr_text("self-\nsupervised state-of-\nthe-art trans-\nlation"),
+            "self-supervised state-of-the-art translation",
+        )
+
+    def test_repairs_contractions_without_joining_quoted_words(self):
+        self.assertEqual(app._clean_ocr_text("We ' re ready. It is 'valid'."),
+                         "We're ready. It is 'valid'.")
+
+    def test_dark_background_and_tight_crop_still_use_source_coordinates(self):
+        image = Image.new("RGB", (300, 25), (30, 30, 30))
+        draw = ImageDraw.Draw(image)
+        text = "The model learns from feedback."
+        draw.text((0, 0), text,
+                  font=ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 12),
+                  fill="white")
+        image.save(self.image_path)
+        paragraphs = app.parse_ocr_paragraphs(self.image_path)
+        self.assertEqual([p["text"] for p in paragraphs], [text])
+        x, y, width, height = paragraphs[0]["box"]
+        self.assertLess(x, 5)
+        self.assertLess(y, 5)
+        self.assertLessEqual(x + width, image.width)
+        self.assertLessEqual(y + height, image.height)
+
+    def test_empty_small_capture_retries_with_mixed_language_detection(self):
+        header = ("level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\t"
+                  "left\ttop\twidth\theight\tconf\ttext\n")
+        page = "1\t1\t0\t0\t0\t0\t0\t0\t540\t90\t-1\t\n"
+        word = "5\t1\t1\t1\t1\t1\t10\t10\t80\t20\t95\tSettings\n"
+        with mock.patch.object(app, "_run_tesseract", side_effect=[
+                header + page, header + page + word]) as run:
+            paragraphs = app.parse_ocr_paragraphs(self.image_path)
+        self.assertEqual(paragraphs, [{"text": "Settings", "box": (0, 0, 40, 10)}])
+        self.assertEqual([call.args[1:3] for call in run.call_args_list],
+                         [("eng+chi_sim", "3"), ("eng+chi_sim", "6")])
+
+    def test_distant_diagram_labels_in_one_ocr_line_stay_separate(self):
+        header = ("level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\t"
+                  "left\ttop\twidth\theight\tconf\ttext\n")
+        rows = (
+            "1\t1\t0\t0\t0\t0\t0\t0\t540\t90\t-1\t\n"
+            "5\t1\t1\t1\t1\t1\t30\t20\t80\t20\t95\tMLPModel\n"
+            "5\t1\t1\t1\t1\t2\t350\t20\t130\t20\t95\tactor_state_dict\n"
+        )
+        with mock.patch.object(app, "_run_tesseract", return_value=header + rows):
+            paragraphs = app.parse_ocr_paragraphs(self.image_path)
+        self.assertEqual([p["text"] for p in paragraphs], ["MLPModel", "actor_state_dict"])
+        self.assertEqual([p["box"] for p in paragraphs], [(10, 5, 40, 10), (170, 5, 65, 10)])
+
+    def test_adjacent_sign_in_and_sign_up_buttons_are_separate_phrases(self):
+        # Real TSV positions from the user's 419x39 capture. Keep the word
+        # space within each label; split the larger gap between the buttons.
+        Image.new("RGB", (419, 39)).save(self.image_path)
+        header = ("level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\t"
+                  "left\ttop\twidth\theight\tconf\ttext\n")
+        rows = "1\t1\t0\t0\t0\t0\t0\t0\t858\t98\t-1\t\n"
+        for n, (x, y, w, h, text) in enumerate([
+            (62, 24, 101, 36, "Search"), (410, 28, 11, 22, "/"),
+            (519, 28, 63, 28, "Sign"), (594, 28, 24, 22, "in"),
+            (696, 28, 63, 28, "Sign"), (771, 34, 35, 22, "up"),
+        ], 1):
+            rows += f"5\t1\t1\t1\t1\t{n}\t{x}\t{y}\t{w}\t{h}\t95\t{text}\n"
+        with mock.patch.object(app, "_run_tesseract", return_value=header + rows):
+            paragraphs = app.parse_ocr_paragraphs(self.image_path)
+        self.assertEqual([p["text"] for p in paragraphs], ["Search", "/", "Sign in", "Sign up"])
+        self.assertEqual(paragraphs[2]["box"], (254, 9, 50, 14))
+        self.assertEqual(paragraphs[3]["box"], (343, 9, 55, 14))
+
+    def test_overlapping_chinese_boxes_keep_tesseract_word_order(self):
+        header = ("level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\t"
+                  "left\ttop\twidth\theight\tconf\ttext\n")
+        rows = (
+            "1\t1\t0\t0\t0\t0\t0\t0\t540\t90\t-1\t\n"
+            "5\t1\t1\t1\t1\t1\t30\t20\t20\t20\t95\t网\n"
+            "5\t1\t1\t1\t1\t2\t50\t20\t20\t20\t95\t络\n"
+            "5\t1\t1\t1\t1\t3\t46\t20\t60\t20\t95\t结构\n"
+        )
+        with mock.patch.object(app, "_run_tesseract", return_value=header + rows):
+            paragraphs = app.parse_ocr_paragraphs(self.image_path)
+        self.assertEqual([p["text"] for p in paragraphs], ["网络结构"])
+
 
 if __name__ == "__main__":
     unittest.main()

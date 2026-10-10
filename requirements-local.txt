@@ -1,0 +1,3 @@
+# CPU runtime for the Argos English->Chinese model. No GPU packages required.
+ctranslate2==4.8.2
+sentencepiece==0.2.2

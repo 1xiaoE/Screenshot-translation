@@ -74,6 +74,17 @@ class MakeBatchesTest(unittest.TestCase):
             self.assertLessEqual(size, app.BATCH_MAX_URL, "batch oversized")
 
 
+class TranslationConfigTest(unittest.TestCase):
+    def test_default_engine_is_single_fast_engine(self):
+        self.assertEqual(app.ENGINES, ["duckduckgo"])
+        self.assertEqual(app.ENGINE_TARGET["duckduckgo"], "zh")
+        self.assertTrue(app.MYMEMORY_URL.endswith("/get"))
+
+    def test_failure_timeouts_are_bounded(self):
+        self.assertLessEqual(app.CONNECT_TIMEOUT, 4)
+        self.assertLessEqual(app.READ_TIMEOUT, 15)
+
+
 class CircuitBreakerTest(unittest.TestCase):
     def tearDown(self):
         for node in list(app._node_failures) + list(app._node_cooldown_until):

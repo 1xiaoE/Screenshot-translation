@@ -1,0 +1,1586 @@
+{
+  "description": "机器人、机械与控制领域英中术语。source为原文，source_variants为明确的英文词形/拼写变体，target为推荐译法，aliases为需纠正的译文，ocr_variants为已确认的OCR误识别。多义词仅在本领域使用。",
+  "version": 2,
+  "terms": [
+    {
+      "source": "quadruped locomotion",
+      "target": "四足运动",
+      "aliases": [
+        "四足行走",
+        "四足移动",
+        "四倍径运动能力"
+      ]
+    },
+    {
+      "source": "legged locomotion",
+      "target": "足式运动",
+      "aliases": [
+        "腿部移动",
+        "腿部运动"
+      ]
+    },
+    {
+      "source": "quadruped robot",
+      "target": "四足机器人",
+      "aliases": [
+        "四足机器",
+        "四脚机器人",
+        "四重机器人",
+        "四倍机器人"
+      ],
+      "source_variants": [
+        "quadruped robots"
+      ]
+    },
+    {
+      "source": "legged robot",
+      "target": "足式机器人",
+      "aliases": [
+        "腿式机器人",
+        "有腿机器人"
+      ],
+      "source_variants": [
+        "legged robots"
+      ]
+    },
+    {
+      "source": "humanoid robot",
+      "target": "人形机器人",
+      "aliases": [
+        "人类机器人"
+      ],
+      "source_variants": [
+        "humanoid robots"
+      ]
+    },
+    {
+      "source": "robotic manipulator",
+      "target": "机器人机械臂",
+      "aliases": [
+        "机器人操纵器"
+      ],
+      "source_variants": [
+        "robotic manipulators"
+      ]
+    },
+    {
+      "source": "robot manipulator",
+      "target": "机器人机械臂",
+      "aliases": [
+        "机器人操纵器"
+      ],
+      "source_variants": [
+        "robot manipulators"
+      ]
+    },
+    {
+      "source": "robot arm",
+      "target": "机械臂",
+      "aliases": [
+        "机器人手臂"
+      ],
+      "source_variants": [
+        "robot arms"
+      ]
+    },
+    {
+      "source": "end effector",
+      "target": "末端执行器",
+      "aliases": [
+        "终端执行器",
+        "末端效应器"
+      ],
+      "source_variants": [
+        "end effectors"
+      ]
+    },
+    {
+      "source": "end-effector",
+      "target": "末端执行器",
+      "aliases": [
+        "终端执行器",
+        "末端效应器"
+      ]
+    },
+    {
+      "source": "forward kinematics",
+      "target": "正运动学",
+      "aliases": [
+        "前向运动学",
+        "前方运动学"
+      ]
+    },
+    {
+      "source": "inverse kinematics",
+      "target": "逆运动学",
+      "aliases": [
+        "反向运动学",
+        "逆向运动学",
+        "反动动能"
+      ]
+    },
+    {
+      "source": "differential kinematics",
+      "target": "微分运动学",
+      "aliases": []
+    },
+    {
+      "source": "rigid body dynamics",
+      "target": "刚体动力学",
+      "aliases": [
+        "刚性体动力学"
+      ]
+    },
+    {
+      "source": "rigid-body dynamics",
+      "target": "刚体动力学",
+      "aliases": [
+        "刚性体动力学"
+      ]
+    },
+    {
+      "source": "inverse dynamics",
+      "target": "逆动力学",
+      "aliases": [
+        "反向动力学",
+        "逆向动力学"
+      ]
+    },
+    {
+      "source": "forward dynamics",
+      "target": "正动力学",
+      "aliases": [
+        "前向动力学"
+      ]
+    },
+    {
+      "source": "kinematic chain",
+      "target": "运动链",
+      "aliases": [
+        "运动学链"
+      ],
+      "source_variants": [
+        "kinematic chains"
+      ]
+    },
+    {
+      "source": "kinematic constraint",
+      "target": "运动学约束",
+      "aliases": []
+    },
+    {
+      "source": "kinematic constraints",
+      "target": "运动学约束",
+      "aliases": []
+    },
+    {
+      "source": "degrees of freedom",
+      "target": "自由度",
+      "aliases": [
+        "自由程度"
+      ]
+    },
+    {
+      "source": "degree of freedom",
+      "target": "自由度",
+      "aliases": [
+        "自由程度"
+      ]
+    },
+    {
+      "source": "Jacobian matrix",
+      "target": "雅可比矩阵",
+      "aliases": [
+        "雅各比矩阵"
+      ],
+      "source_variants": [
+        "Jacobian matrices"
+      ]
+    },
+    {
+      "source": "joint space",
+      "target": "关节空间",
+      "aliases": [
+        "联合空间"
+      ],
+      "source_variants": [
+        "joint spaces"
+      ]
+    },
+    {
+      "source": "task space",
+      "target": "任务空间",
+      "aliases": [],
+      "source_variants": [
+        "task spaces"
+      ]
+    },
+    {
+      "source": "configuration space",
+      "target": "构型空间",
+      "aliases": [
+        "配置空间"
+      ],
+      "source_variants": [
+        "configuration spaces"
+      ]
+    },
+    {
+      "source": "workspace",
+      "target": "工作空间",
+      "aliases": []
+    },
+    {
+      "source": "center of mass",
+      "target": "质心",
+      "aliases": [
+        "质量中心"
+      ]
+    },
+    {
+      "source": "centre of mass",
+      "target": "质心",
+      "aliases": [
+        "质量中心"
+      ]
+    },
+    {
+      "source": "center of gravity",
+      "target": "重心",
+      "aliases": []
+    },
+    {
+      "source": "moment of inertia",
+      "target": "转动惯量",
+      "aliases": [
+        "惯性矩"
+      ]
+    },
+    {
+      "source": "inertia tensor",
+      "target": "惯性张量",
+      "aliases": [],
+      "source_variants": [
+        "inertia tensors"
+      ]
+    },
+    {
+      "source": "angular velocity",
+      "target": "角速度",
+      "aliases": []
+    },
+    {
+      "source": "angular acceleration",
+      "target": "角加速度",
+      "aliases": []
+    },
+    {
+      "source": "joint torque",
+      "target": "关节力矩",
+      "aliases": [
+        "联合扭矩",
+        "关节扭矩"
+      ]
+    },
+    {
+      "source": "joint torques",
+      "target": "关节力矩",
+      "aliases": [
+        "联合扭矩",
+        "关节扭矩"
+      ]
+    },
+    {
+      "source": "torque",
+      "target": "力矩",
+      "aliases": [
+        "扭矩"
+      ],
+      "source_variants": [
+        "torques"
+      ]
+    },
+    {
+      "source": "actuator",
+      "target": "执行器",
+      "aliases": [
+        "致动器",
+        "促动器"
+      ]
+    },
+    {
+      "source": "actuators",
+      "target": "执行器",
+      "aliases": [
+        "致动器",
+        "促动器"
+      ]
+    },
+    {
+      "source": "servo motor",
+      "target": "伺服电机",
+      "aliases": [
+        "伺服马达"
+      ],
+      "source_variants": [
+        "servo motors"
+      ]
+    },
+    {
+      "source": "harmonic drive",
+      "target": "谐波传动",
+      "aliases": [
+        "谐波驱动",
+        "口琴驱动器",
+        "口琴驱动"
+      ],
+      "source_variants": [
+        "harmonic drives"
+      ]
+    },
+    {
+      "source": "planetary gearbox",
+      "target": "行星齿轮箱",
+      "aliases": [
+        "行星变速箱"
+      ],
+      "source_variants": [
+        "planetary gearboxes"
+      ]
+    },
+    {
+      "source": "gear ratio",
+      "target": "传动比",
+      "aliases": [
+        "齿轮比"
+      ],
+      "source_variants": [
+        "gear ratios"
+      ]
+    },
+    {
+      "source": "gear backlash",
+      "target": "齿轮侧隙",
+      "aliases": [
+        "齿轮反弹"
+      ]
+    },
+    {
+      "source": "backlash",
+      "target": "回程间隙",
+      "aliases": [
+        "反弹",
+        "反冲"
+      ]
+    },
+    {
+      "source": "compliance",
+      "target": "柔顺性",
+      "aliases": [
+        "遵守",
+        "合规性"
+      ]
+    },
+    {
+      "source": "stiffness",
+      "target": "刚度",
+      "aliases": [
+        "僵硬度",
+        "僵硬性",
+        "僵硬"
+      ]
+    },
+    {
+      "source": "damping",
+      "target": "阻尼",
+      "aliases": []
+    },
+    {
+      "source": "mechanical impedance",
+      "target": "机械阻抗",
+      "aliases": []
+    },
+    {
+      "source": "finite element analysis",
+      "target": "有限元分析",
+      "aliases": []
+    },
+    {
+      "source": "finite element method",
+      "target": "有限元法",
+      "aliases": [
+        "有限元素法"
+      ]
+    },
+    {
+      "source": "tensile strength",
+      "target": "抗拉强度",
+      "aliases": [
+        "拉伸强度"
+      ]
+    },
+    {
+      "source": "yield strength",
+      "target": "屈服强度",
+      "aliases": []
+    },
+    {
+      "source": "fatigue life",
+      "target": "疲劳寿命",
+      "aliases": []
+    },
+    {
+      "source": "elastic modulus",
+      "target": "弹性模量",
+      "aliases": [
+        "弹性系数"
+      ]
+    },
+    {
+      "source": "Young modulus",
+      "target": "杨氏模量",
+      "aliases": []
+    },
+    {
+      "source": "Young's modulus",
+      "target": "杨氏模量",
+      "aliases": []
+    },
+    {
+      "source": "model predictive control",
+      "target": "模型预测控制",
+      "aliases": [
+        "模型预测性控制",
+        "模型预见控制"
+      ]
+    },
+    {
+      "source": "model predictive controller",
+      "target": "模型预测控制器",
+      "aliases": [
+        "模型预测性控制器"
+      ],
+      "source_variants": [
+        "model predictive controllers"
+      ]
+    },
+    {
+      "source": "whole-body control",
+      "target": "全身控制",
+      "aliases": [
+        "全体控制"
+      ]
+    },
+    {
+      "source": "whole body control",
+      "target": "全身控制",
+      "aliases": [
+        "全体控制"
+      ]
+    },
+    {
+      "source": "impedance control",
+      "target": "阻抗控制",
+      "aliases": []
+    },
+    {
+      "source": "admittance control",
+      "target": "导纳控制",
+      "aliases": [
+        "准入控制",
+        "接纳控制"
+      ]
+    },
+    {
+      "source": "force control",
+      "target": "力控制",
+      "aliases": [
+        "力量控制"
+      ]
+    },
+    {
+      "source": "position control",
+      "target": "位置控制",
+      "aliases": []
+    },
+    {
+      "source": "trajectory tracking",
+      "target": "轨迹跟踪",
+      "aliases": [
+        "轨道追踪",
+        "轨迹追踪"
+      ]
+    },
+    {
+      "source": "motion planning",
+      "target": "运动规划",
+      "aliases": [
+        "运动计划"
+      ]
+    },
+    {
+      "source": "trajectory optimization",
+      "target": "轨迹优化",
+      "aliases": [
+        "轨道优化"
+      ]
+    },
+    {
+      "source": "optimal control",
+      "target": "最优控制",
+      "aliases": [
+        "最佳控制"
+      ]
+    },
+    {
+      "source": "robust control",
+      "target": "鲁棒控制",
+      "aliases": [
+        "稳健控制"
+      ]
+    },
+    {
+      "source": "robust optimization",
+      "target": "鲁棒优化",
+      "aliases": [
+        "稳健优化"
+      ]
+    },
+    {
+      "source": "adaptive control",
+      "target": "自适应控制",
+      "aliases": [
+        "适应性控制"
+      ]
+    },
+    {
+      "source": "feedback control",
+      "target": "反馈控制",
+      "aliases": []
+    },
+    {
+      "source": "feedforward control",
+      "target": "前馈控制",
+      "aliases": [
+        "前向控制"
+      ]
+    },
+    {
+      "source": "state estimation",
+      "target": "状态估计",
+      "aliases": [
+        "国家估计"
+      ]
+    },
+    {
+      "source": "state observer",
+      "target": "状态观测器",
+      "aliases": [
+        "状态观察者"
+      ],
+      "source_variants": [
+        "state observers"
+      ]
+    },
+    {
+      "source": "Kalman filter",
+      "target": "卡尔曼滤波器",
+      "aliases": [
+        "卡尔曼过滤器"
+      ],
+      "source_variants": [
+        "Kalman filters"
+      ]
+    },
+    {
+      "source": "disturbance observer",
+      "target": "扰动观测器",
+      "aliases": [
+        "干扰观察者"
+      ],
+      "source_variants": [
+        "disturbance observers"
+      ]
+    },
+    {
+      "source": "quadratic programming",
+      "target": "二次规划",
+      "aliases": [
+        "二次程序"
+      ]
+    },
+    {
+      "source": "quadratic program",
+      "target": "二次规划",
+      "aliases": [
+        "二次程序"
+      ],
+      "source_variants": [
+        "quadratic programs"
+      ]
+    },
+    {
+      "source": "quadratic constrained quadratic program",
+      "target": "二次约束二次规划",
+      "aliases": [],
+      "source_variants": [
+        "quadratic constrained quadratic programs"
+      ]
+    },
+    {
+      "source": "quadratically constrained quadratic program",
+      "target": "二次约束二次规划",
+      "aliases": [],
+      "source_variants": [
+        "quadratically constrained quadratic programs"
+      ]
+    },
+    {
+      "source": "min-max optimization",
+      "target": "极小极大优化",
+      "aliases": [
+        "最小最大优化",
+        "最小极大优化",
+        "最小-最大优化"
+      ],
+      "source_variants": [
+        "min–max optimization",
+        "min−max optimization"
+      ]
+    },
+    {
+      "source": "minimax optimization",
+      "target": "极小极大优化",
+      "aliases": [
+        "最小最大优化",
+        "最小极大优化"
+      ]
+    },
+    {
+      "source": "convex optimization",
+      "target": "凸优化",
+      "aliases": []
+    },
+    {
+      "source": "nonlinear optimization",
+      "target": "非线性优化",
+      "aliases": []
+    },
+    {
+      "source": "constraint satisfaction",
+      "target": "约束满足",
+      "aliases": [
+        "限制满足"
+      ]
+    },
+    {
+      "source": "gait",
+      "target": "步态",
+      "aliases": [
+        "步伐"
+      ],
+      "source_variants": [
+        "gaits"
+      ]
+    },
+    {
+      "source": "gait planning",
+      "target": "步态规划",
+      "aliases": [
+        "步行计划"
+      ]
+    },
+    {
+      "source": "gait generation",
+      "target": "步态生成",
+      "aliases": [
+        "步行生成"
+      ]
+    },
+    {
+      "source": "swing phase",
+      "target": "摆动相",
+      "aliases": [
+        "摇摆阶段",
+        "摆动阶段"
+      ],
+      "source_variants": [
+        "swing phases"
+      ]
+    },
+    {
+      "source": "stance phase",
+      "target": "支撑相",
+      "aliases": [
+        "站立阶段",
+        "立场阶段"
+      ],
+      "source_variants": [
+        "stance phases"
+      ]
+    },
+    {
+      "source": "foot placement",
+      "target": "落足点规划",
+      "aliases": [
+        "脚步放置",
+        "脚放置"
+      ]
+    },
+    {
+      "source": "support polygon",
+      "target": "支撑多边形",
+      "aliases": [
+        "支持多边形"
+      ],
+      "source_variants": [
+        "support polygons"
+      ]
+    },
+    {
+      "source": "zero moment point",
+      "target": "零力矩点",
+      "aliases": [
+        "零动量点"
+      ],
+      "source_variants": [
+        "zero moment points"
+      ]
+    },
+    {
+      "source": "ground reaction force",
+      "target": "地面反作用力",
+      "aliases": [
+        "地面反应力"
+      ]
+    },
+    {
+      "source": "ground reaction forces",
+      "target": "地面反作用力",
+      "aliases": [
+        "地面反应力"
+      ]
+    },
+    {
+      "source": "contact force",
+      "target": "接触力",
+      "aliases": []
+    },
+    {
+      "source": "contact forces",
+      "target": "接触力",
+      "aliases": []
+    },
+    {
+      "source": "contact dynamics",
+      "target": "接触动力学",
+      "aliases": []
+    },
+    {
+      "source": "friction cone",
+      "target": "摩擦锥",
+      "aliases": [],
+      "source_variants": [
+        "friction cones"
+      ]
+    },
+    {
+      "source": "friction constraints",
+      "target": "摩擦约束",
+      "aliases": [
+        "摩擦限制"
+      ],
+      "source_variants": [
+        "friction constraint"
+      ]
+    },
+    {
+      "source": "friction coefficient",
+      "target": "摩擦系数",
+      "aliases": [],
+      "source_variants": [
+        "friction coefficients"
+      ]
+    },
+    {
+      "source": "terrain adaptation",
+      "target": "地形适应",
+      "aliases": []
+    },
+    {
+      "source": "rough terrain",
+      "target": "崎岖地形",
+      "aliases": [
+        "粗糙地形"
+      ]
+    },
+    {
+      "source": "sim-to-real transfer",
+      "target": "仿真到现实迁移",
+      "aliases": [
+        "模拟到真实转移"
+      ]
+    },
+    {
+      "source": "domain randomization",
+      "target": "域随机化",
+      "aliases": [
+        "领域随机化"
+      ]
+    },
+    {
+      "source": "reinforcement learning",
+      "target": "强化学习",
+      "aliases": [
+        "增强学习"
+      ]
+    },
+    {
+      "source": "policy gradient",
+      "target": "策略梯度",
+      "aliases": [
+        "政策梯度"
+      ],
+      "source_variants": [
+        "policy gradients"
+      ]
+    },
+    {
+      "source": "reward function",
+      "target": "奖励函数",
+      "aliases": [
+        "报酬函数"
+      ],
+      "source_variants": [
+        "reward functions"
+      ]
+    },
+    {
+      "source": "observation space",
+      "target": "观测空间",
+      "aliases": [
+        "观察空间"
+      ],
+      "source_variants": [
+        "observation spaces"
+      ]
+    },
+    {
+      "source": "action space",
+      "target": "动作空间",
+      "aliases": [
+        "行动空间"
+      ],
+      "source_variants": [
+        "action spaces"
+      ]
+    },
+    {
+      "source": "proprioception",
+      "target": "本体感觉",
+      "aliases": [
+        "本体感受"
+      ]
+    },
+    {
+      "source": "proprioceptive",
+      "target": "本体感知",
+      "aliases": [
+        "本体感受"
+      ]
+    },
+    {
+      "source": "inertial measurement unit",
+      "target": "惯性测量单元",
+      "aliases": [],
+      "source_variants": [
+        "inertial measurement units"
+      ]
+    },
+    {
+      "source": "simultaneous localization and mapping",
+      "target": "同时定位与建图",
+      "aliases": [
+        "同步定位和映射"
+      ]
+    },
+    {
+      "source": "point cloud",
+      "target": "点云",
+      "aliases": [],
+      "source_variants": [
+        "point clouds"
+      ]
+    },
+    {
+      "source": "odometry",
+      "target": "里程计",
+      "aliases": [
+        "测距法"
+      ]
+    },
+    {
+      "source": "SLAM",
+      "target": "SLAM",
+      "aliases": []
+    },
+    {
+      "source": "MPC",
+      "target": "MPC",
+      "aliases": []
+    },
+    {
+      "source": "PPO",
+      "target": "PPO",
+      "aliases": []
+    },
+    {
+      "source": "ROS",
+      "target": "ROS",
+      "aliases": []
+    },
+    {
+      "source": "URDF",
+      "target": "URDF",
+      "aliases": []
+    },
+    {
+      "source": "IMU",
+      "target": "IMU",
+      "aliases": []
+    },
+    {
+      "source": "DOF",
+      "target": "DOF",
+      "aliases": []
+    },
+    {
+      "source": "PID",
+      "target": "PID",
+      "aliases": []
+    },
+    {
+      "source": "CAD",
+      "target": "CAD",
+      "aliases": []
+    },
+    {
+      "source": "CAE",
+      "target": "CAE",
+      "aliases": []
+    },
+    {
+      "source": "FEM",
+      "target": "FEM",
+      "aliases": []
+    },
+    {
+      "source": "ZMP",
+      "target": "ZMP",
+      "aliases": []
+    },
+    {
+      "source": "WBC",
+      "target": "WBC",
+      "aliases": []
+    },
+    {
+      "source": "model dynamics",
+      "target": "模型动力学",
+      "aliases": [
+        "模型动态"
+      ]
+    },
+    {
+      "source": "robot dynamics",
+      "target": "机器人动力学",
+      "aliases": [
+        "机器人动态"
+      ]
+    },
+    {
+      "source": "uncertain model dynamics",
+      "target": "不确定的模型动力学",
+      "aliases": [
+        "不确定的模型动态"
+      ]
+    },
+    {
+      "source": "structured uncertainties",
+      "target": "结构化不确定性",
+      "aliases": [],
+      "source_variants": [
+        "structured uncertainty"
+      ]
+    },
+    {
+      "source": "uncertain friction constraints",
+      "target": "不确定的摩擦约束",
+      "aliases": [
+        "不确定摩擦约束"
+      ],
+      "source_variants": [
+        "uncertain friction constraint"
+      ]
+    },
+    {
+      "source": "min-max",
+      "target": "极小极大",
+      "aliases": [
+        "min-max",
+        "最小最大",
+        "最小极大"
+      ],
+      "source_variants": [
+        "min–max",
+        "min−max"
+      ]
+    },
+    {
+      "source": "robust",
+      "target": "鲁棒",
+      "aliases": [
+        "稳健",
+        "强力",
+        "强大"
+      ]
+    },
+    {
+      "source": "robust model predictive control",
+      "target": "鲁棒模型预测控制",
+      "aliases": [
+        "稳健模型预测控制"
+      ]
+    },
+    {
+      "source": "convex",
+      "target": "凸",
+      "aliases": [
+        "对流",
+        "凸面"
+      ]
+    },
+    {
+      "source": "convex quadratic constrained quadratic program",
+      "target": "凸二次约束二次规划",
+      "aliases": [
+        "对流二次约束二次规划"
+      ],
+      "source_variants": [
+        "convex quadratic constrained quadratic programs"
+      ]
+    },
+    {
+      "source": "convex quadratically constrained quadratic program",
+      "target": "凸二次约束二次规划",
+      "aliases": [
+        "对流二次约束二次规划"
+      ],
+      "source_variants": [
+        "convex quadratically constrained quadratic programs"
+      ]
+    },
+    {
+      "source": "controller",
+      "target": "控制器",
+      "aliases": [
+        "控制员"
+      ],
+      "source_variants": [
+        "controllers"
+      ]
+    },
+    {
+      "source": "proposed controller",
+      "target": "所提出的控制器",
+      "aliases": [
+        "拟议的控制员",
+        "拟议的控制器"
+      ],
+      "source_variants": [
+        "proposed controllers"
+      ]
+    },
+    {
+      "source": "solving frequency",
+      "target": "求解频率",
+      "aliases": [
+        "解频"
+      ]
+    },
+    {
+      "source": "solving the optimization model",
+      "target": "求解优化模型",
+      "aliases": [
+        "解析优化模型"
+      ],
+      "source_variants": [
+        "solving the optimization models"
+      ]
+    },
+    {
+      "source": "real robot",
+      "target": "真实机器人",
+      "aliases": [
+        "真正的机器人"
+      ],
+      "source_variants": [
+        "real robots"
+      ]
+    },
+    {
+      "source": "this article",
+      "target": "本文",
+      "aliases": [
+        "本条",
+        "这篇文章",
+        "这篇论文",
+        "他的文章"
+      ]
+    },
+    {
+      "source": "Gurobi",
+      "target": "Gurobi",
+      "aliases": [
+        "古罗比"
+      ]
+    },
+    {
+      "source": "shaft torque",
+      "target": "轴扭矩",
+      "aliases": [
+        "轴力矩"
+      ],
+      "source_variants": [
+        "shaft torques"
+      ]
+    },
+    {
+      "source": "torsional stiffness",
+      "target": "扭转刚度",
+      "aliases": [
+        "扭转僵硬度"
+      ]
+    },
+    {
+      "source": "rotational inertia",
+      "target": "转动惯量",
+      "aliases": [
+        "旋转惯性"
+      ]
+    },
+    {
+      "source": "ball screw",
+      "target": "滚珠丝杠",
+      "aliases": [
+        "球螺丝",
+        "球形螺丝"
+      ],
+      "source_variants": [
+        "ball screws"
+      ]
+    },
+    {
+      "source": "lead screw",
+      "target": "丝杠",
+      "aliases": [
+        "铅螺丝"
+      ],
+      "source_variants": [
+        "lead screws"
+      ]
+    },
+    {
+      "source": "revolute joint",
+      "target": "转动关节",
+      "aliases": [
+        "旋转关节"
+      ],
+      "source_variants": [
+        "revolute joints"
+      ]
+    },
+    {
+      "source": "prismatic joint",
+      "target": "移动关节",
+      "aliases": [
+        "棱柱接头",
+        "棱柱关节"
+      ],
+      "source_variants": [
+        "prismatic joints"
+      ]
+    },
+    {
+      "source": "serial manipulator",
+      "target": "串联机械臂",
+      "aliases": [
+        "串联操纵器"
+      ],
+      "source_variants": [
+        "serial manipulators"
+      ]
+    },
+    {
+      "source": "parallel manipulator",
+      "target": "并联机械臂",
+      "aliases": [
+        "平行操纵器"
+      ],
+      "source_variants": [
+        "parallel manipulators"
+      ]
+    },
+    {
+      "source": "series elastic actuator",
+      "target": "串联弹性执行器",
+      "aliases": [
+        "串联弹性致动器"
+      ],
+      "source_variants": [
+        "series elastic actuators"
+      ]
+    },
+    {
+      "source": "ANYmal",
+      "target": "ANYmal",
+      "aliases": [
+        "Ahmal"
+      ],
+      "ocr_variants": [
+        "ANY mal",
+        "ANY mai"
+      ]
+    },
+    {
+      "source": "HyQ",
+      "target": "HyQ",
+      "aliases": []
+    },
+    {
+      "source": "MIT Cheetah",
+      "target": "MIT Cheetah",
+      "aliases": [
+        "MIT Chetah"
+      ]
+    },
+    {
+      "source": "Cheetah II",
+      "target": "Cheetah II",
+      "aliases": []
+    },
+    {
+      "source": "Cheetah III",
+      "target": "Cheetah III",
+      "aliases": []
+    },
+    {
+      "source": "Mini Cheetah",
+      "target": "Mini Cheetah",
+      "aliases": [
+        "Mini Chetah"
+      ]
+    },
+    {
+      "source": "Boston Dynamics Spot",
+      "target": "Boston Dynamics Spot",
+      "aliases": []
+    },
+    {
+      "source": "Unitree A1",
+      "target": "Unitree A1",
+      "aliases": [],
+      "ocr_variants": [
+        "Unitree Al",
+        "Unitree A l"
+      ]
+    },
+    {
+      "source": "Unitree Go1",
+      "target": "Unitree Go1",
+      "aliases": [],
+      "ocr_variants": [
+        "Unitree Gol",
+        "Unitree Go l"
+      ]
+    },
+    {
+      "source": "Unitree Go2",
+      "target": "Unitree Go2",
+      "aliases": []
+    },
+    {
+      "source": "Unitree G1",
+      "target": "Unitree G1",
+      "aliases": [],
+      "ocr_variants": [
+        "Unitree Gl"
+      ]
+    },
+    {
+      "source": "animal counterparts",
+      "target": "对应的动物",
+      "aliases": [
+        "动物对应体",
+        "动物对等体"
+      ]
+    },
+    {
+      "source": "two-stage optimization algorithm",
+      "target": "两阶段优化算法",
+      "aliases": [],
+      "source_variants": [
+        "two-stage optimization algorithms"
+      ]
+    },
+    {
+      "source": "robot model",
+      "target": "机器人模型",
+      "aliases": [],
+      "source_variants": [
+        "robot models"
+      ]
+    },
+    {
+      "source": "external environment",
+      "target": "外部环境",
+      "aliases": [],
+      "source_variants": [
+        "external environments"
+      ]
+    },
+    {
+      "source": "hardware damage",
+      "target": "硬件损坏",
+      "aliases": [
+        "硬件损伤"
+      ]
+    },
+    {
+      "source": "significant disturbances",
+      "target": "显著扰动",
+      "aliases": [
+        "重大扰动"
+      ]
+    },
+    {
+      "source": "duality theory",
+      "target": "对偶理论",
+      "aliases": [
+        "双重性理论",
+        "二元性理论"
+      ]
+    },
+    {
+      "source": "convex analysis",
+      "target": "凸分析",
+      "aliases": []
+    },
+    {
+      "source": "active set method",
+      "target": "主动集法",
+      "aliases": [
+        "主动设定方法",
+        "主动方法",
+        "活跃集方法"
+      ],
+      "source_variants": [
+        "active-set method",
+        "active set methods",
+        "active-set methods"
+      ]
+    },
+    {
+      "source": "predictive horizon",
+      "target": "预测时域",
+      "aliases": [
+        "预测地平线",
+        "预测视界"
+      ],
+      "source_variants": [
+        "predictive horizons"
+      ]
+    },
+    {
+      "source": "prediction horizon",
+      "target": "预测时域",
+      "aliases": [
+        "预测地平线",
+        "预测视界"
+      ],
+      "source_variants": [
+        "prediction horizons"
+      ]
+    },
+    {
+      "source": "small predictive horizon",
+      "target": "较短的预测时域",
+      "aliases": [
+        "小的预测地平线",
+        "小的预测时域"
+      ],
+      "source_variants": [
+        "small prediction horizon"
+      ]
+    },
+    {
+      "source": "very computationally intense",
+      "target": "计算开销很大",
+      "aliases": [
+        "在计算上非常剧烈",
+        "计算上非常剧烈",
+        "计算上非常密集"
+      ]
+    },
+    {
+      "source": "computationally intense",
+      "target": "计算开销大",
+      "aliases": [
+        "计算上剧烈",
+        "计算上密集"
+      ],
+      "source_variants": [
+        "computationally intensive"
+      ]
+    },
+    {
+      "source": "legged locomotion community",
+      "target": "足式机器人研究领域",
+      "aliases": [
+        "足式运动群落",
+        "足式运动群体"
+      ]
+    },
+    {
+      "source": "baseline controller",
+      "target": "基准控制器",
+      "aliases": [
+        "基线控制器"
+      ],
+      "source_variants": [
+        "baseline controllers"
+      ]
+    },
+    {
+      "source": "quadruped locomotion control",
+      "target": "四足运动控制",
+      "aliases": [
+        "四重奏乐控制"
+      ]
+    },
+    {
+      "source": "quadruped locomotion community",
+      "target": "四足机器人研究领域",
+      "aliases": [
+        "四足运动社区",
+        "四重奏的火车头社区"
+      ]
+    },
+    {
+      "source": "quadrupedal gaits",
+      "target": "四足步态",
+      "aliases": [
+        "四面体步态",
+        "四面体尺寸"
+      ],
+      "source_variants": [
+        "quadrupedal gait",
+        "quadruped gait",
+        "quadruped gaits"
+      ]
+    },
+    {
+      "source": "heuristic controller",
+      "target": "启发式控制器",
+      "aliases": [
+        "heuristic控制器",
+        "heuristic 控制器",
+        "热力控制器"
+      ],
+      "source_variants": [
+        "heuristic controllers"
+      ]
+    },
+    {
+      "source": "differential dynamic programming",
+      "target": "微分动态规划",
+      "aliases": [
+        "差异动态编程",
+        "差分动态规划"
+      ]
+    },
+    {
+      "source": "whole-body MPC",
+      "target": "全身MPC",
+      "aliases": [
+        "全体MPC",
+        "全体 MPC"
+      ],
+      "source_variants": [
+        "whole body MPC"
+      ]
+    },
+    {
+      "source": "model-based locomotion controller",
+      "target": "基于模型的运动控制器",
+      "aliases": [
+        "基于模型的操控器",
+        "基于模型的locomotion控制器",
+        "基于模型的 locomotion 控制器"
+      ],
+      "source_variants": [
+        "model-based locomotion controllers",
+        "modelbased locomotion controller",
+        "modelbased locomotion controllers"
+      ]
+    },
+    {
+      "source": "MIT Mini Cheetah",
+      "target": "MIT Mini Cheetah",
+      "aliases": [
+        "MITMini Cheetah",
+        "MIT小型Cheetah",
+        "MIT小型 Cheetah"
+      ]
+    },
+    {
+      "source": "MIT Cheetah 3",
+      "target": "MIT Cheetah 3",
+      "aliases": [
+        "MIT Chetah 3"
+      ]
+    },
+    {
+      "source": "nominal MPC",
+      "target": "标称MPC",
+      "aliases": [
+        "名义MPC",
+        "名义 MPC"
+      ]
+    },
+    {
+      "source": "Sign in",
+      "target": "登录",
+      "aliases": [
+        "签名"
+      ],
+      "source_variants": [
+        "Log in",
+        "Login"
+      ]
+    },
+    {
+      "source": "Sign up",
+      "target": "注册",
+      "aliases": [],
+      "source_variants": [
+        "Signup"
+      ]
+    },
+    {
+      "source": "Search",
+      "target": "搜索",
+      "aliases": []
+    }
+  ]
+}

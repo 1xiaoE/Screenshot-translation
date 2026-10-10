@@ -2,12 +2,12 @@
 """A small Youdao-style screenshot translator for X11/GNOME.
 
 Ctrl+Alt+O draws a rectangle on the frozen desktop (black-screen safe: the
-frozen screenshot is painted before the dark overlay).  OCR text is grouped
-into paragraphs by (block_num, par_num); each paragraph is translated once via
-the Mozhi GET /api/translate API (query params, session reuse, node/engine
-fallback, disk cache, max 4 attempts); the Chinese translation is rendered back
-into the captured image at the original paragraph positions with a unified font
-size, per-column collision-free boxes, and a final validate_layout() assertion.
+frozen screenshot is painted before the dark overlay).  Mixed-language OCR
+separates distant labels and groups prose; English paragraphs are translated by
+a local Argos en->zh CPU model with a robotics/mechanics glossary and disk
+cache. An explicitly selected remote backend remains available. Chinese is rendered back
+into the captured image while Chinese, code names and icons retain their source
+pixels. Crowded paragraphs flow downward and display their translations only.
 A non-blocking progress window tracks capture/OCR/translation on a worker
 thread while a single-instance lock keeps repeated shortcut presses from
 starting a second task.
@@ -15,6 +15,7 @@ starting a second task.
 import ast
 import csv
 import fcntl
+import html
 import io
 import json
 import logging
@@ -28,12 +29,13 @@ import sys
 import threading
 import time
 import unicodedata
-from concurrent.futures import Future, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, as_completed, wait
 from pathlib import Path
 from urllib.parse import urlencode
 
 import requests
-from PIL import Image, ImageDraw, ImageFont
+import local_translation
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
@@ -48,6 +50,7 @@ TESSDATA = ROOT / "tessdata"
 LOG_FILE = ROOT / "screenshot_translator.log"
 CACHE_FILE = ROOT / "translation_cache.json"
 LOCK_FILE = ROOT / "task.lock"
+RESULT_FOCUS_Y = 0
 FONT = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 FONT_BOLD = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
 
@@ -58,6 +61,12 @@ FONT_STEP = 2
 BOX_GAP = 4            # minimum px gap between translation boxes
 PAD_H, PAD_V = 6, 4    # inner padding of a translation box
 OCR_PSM = "3"          # automatic segmentation keeps separate columns as blocks
+OCR_LANG = os.environ.get("SCREENSHOT_TRANSLATOR_OCR_LANG", "eng+chi_sim").strip() or "eng+chi_sim"
+SOURCE_LANG = os.environ.get("SCREENSHOT_TRANSLATOR_SOURCE_LANG", "en").strip() or "en"
+TRANSLATION_BACKEND = os.environ.get("SCREENSHOT_TRANSLATOR_BACKEND", "local").strip().lower() or "local"
+_local_client = local_translation.LocalClient()
+_local_error = ""
+OCR_BORDER = 10        # pixels added after scaling; removed from returned boxes
 OCR_SCALE = 2          # raise small glyphs above Tesseract's minimum x-height
 OCR_MAX_PIXELS = 5_000_000   # cap on the upscaled image area fed to Tesseract
 
@@ -83,12 +92,26 @@ DEFAULT_NODES = [
 # allow overriding the node list for testing/firewalls: MOZHI_NODES=a,b,c
 _env_nodes = os.environ.get("MOZHI_NODES", "").strip()
 NODES = [n.strip() for n in _env_nodes.split(",") if n.strip()] if _env_nodes else DEFAULT_NODES
-# DuckDuckGo (Bing-backed) is the primary engine; google is tried on the same
-# node when duckduckgo returns an HTTP error or an empty result (never on
-# network failures).  google needs "zh-CN" while duckduckgo accepts "zh".
-ENGINES = ["duckduckgo", "google"]
+# DuckDuckGo (Bing-backed) is the fast/default engine.  A second engine can be
+# enabled explicitly when a deployment needs it, but trying it automatically
+# after a public-node HTTP 500 doubles the wait during an outage.
+_engine_override = os.environ.get("SCREENSHOT_TRANSLATOR_ENGINES", "").strip()
+ENGINES = ([e.strip() for e in _engine_override.split(",")
+            if e.strip()] if _engine_override else ["duckduckgo"])
 ENGINE_TARGET = {"duckduckgo": "zh", "google": "zh-CN"}
+MYMEMORY_URL = "https://api.mymemory.translated.net/get"
+MYMEMORY_MAX_BYTES = 500
 MAX_TRANSLATE_WORKERS = 3
+# Public nodes are frequently unreachable through a desktop proxy.  Keep the
+# failure path bounded; successful requests still get the full read timeout.
+CONNECT_TIMEOUT = 4
+READ_TIMEOUT = 15
+# One node request per worker; when the preferred node fails, the remaining
+# nodes are raced instead of being tried serially.
+MAX_NODE_WORKERS = max(1, len(NODES))
+
+# The request path is intentionally separate from the paragraph pool.  A
+# paragraph worker may race several nodes without deadlocking its own pool.
 MAX_ATTEMPTS_PER_PARAGRAPH = len(NODES) * len(ENGINES)
 # One GET query per batch: Bing itself rejects ~>1000 chars (HTTP 500), and the
 # reverse proxies in front of the public nodes reject long URLs (HTTP 431/414),
@@ -130,7 +153,7 @@ def detect_desktop_proxy():
     return ""
 
 
-DESKTOP_PROXY = detect_desktop_proxy()
+DESKTOP_PROXY = detect_desktop_proxy() if TRANSLATION_BACKEND == "remote" else ""
 if DESKTOP_PROXY:
     logging.info("desktop proxy enabled")
 
@@ -166,6 +189,8 @@ class _WorkerPool:
             fn, fut = self._q.get()
             if fn is None:
                 return
+            if not fut.set_running_or_notify_cancel():
+                continue
             try:
                 result = fn()
             except BaseException as exc:
@@ -181,6 +206,7 @@ class _WorkerPool:
 
 _translate_executor = _WorkerPool(MAX_TRANSLATE_WORKERS, "translate")
 _chunk_executor = _WorkerPool(MAX_TRANSLATE_WORKERS, "chunk")
+_node_executor = _WorkerPool(MAX_NODE_WORKERS, "node")
 
 
 def _tls_session():
@@ -226,14 +252,23 @@ def save_cache():
         _save_cache_now()
 
 
+def _cache_key(text):
+    # Do not reuse old autodetected translations, or translations produced
+    # under different language/engine settings. Whitespace variants share a key.
+    identity = ([local_translation.PIPELINE_VERSION, local_translation.glossary_identity()]
+                if TRANSLATION_BACKEND == "local" else ["remote", ENGINES])
+    return json.dumps(["en-zh-v4", SOURCE_LANG, identity, _clean_ocr_text(text)],
+                      ensure_ascii=False)
+
+
 def cache_get(text):
     with _cache_lock:
-        return _cache.get(text)
+        return _cache.get(_cache_key(text))
 
 
 def cache_set(text, value):
     with _cache_lock:
-        _cache[text] = value
+        _cache[_cache_key(text)] = value
         if len(_cache) > CACHE_MAX_ENTRIES:
             for k in list(_cache)[:len(_cache) - CACHE_MAX_ENTRIES]:
                 del _cache[k]
@@ -280,23 +315,78 @@ def save_state(state):
     STATE.write_text(json.dumps(state, ensure_ascii=False, indent=2))
 
 
-def screen_pixbuf():
+def pointer_monitor():
+    """Resolve the target once, before any of our windows can take focus."""
+    display = Gdk.Display.get_default()
+    if display is None:
+        raise RuntimeError("无法访问桌面画面，请确认当前为 X11 会话")
+    _screen, x, y = display.get_default_seat().get_pointer().get_position()
+    monitor = display.get_monitor_at_point(x, y)
+    if monitor is None:
+        raise RuntimeError("无法确定鼠标所在屏幕")
+    return monitor
+
+
+def monitor_bounds(monitor):
+    geometry = monitor.get_geometry()
+    return (geometry.x, geometry.y, geometry.width, geometry.height)
+
+
+def region_within_bounds(rect, bounds):
+    if not isinstance(rect, (list, tuple)) or len(rect) != 4:
+        return False
+    if not all(isinstance(value, int) for value in rect):
+        return False
+    x, y, width, height = rect
+    left, top, screen_width, screen_height = bounds
+    return (width > 0 and height > 0 and x >= left and y >= top
+            and x + width <= left + screen_width
+            and y + height <= top + screen_height)
+
+
+def selection_region(start, end, allocation, bounds):
+    """Clamp a drag to this monitor and map window coordinates to the desktop."""
+    left, top, width, height = bounds
+    def point(value):
+        return (round(min(width, max(0, value[0] * width / allocation.width))),
+                round(min(height, max(0, value[1] * height / allocation.height))))
+    x1, y1 = point(start)
+    x2, y2 = point(end)
+    return (left + min(x1, x2), top + min(y1, y2),
+            abs(x2 - x1), abs(y2 - y1))
+
+
+def screen_pixbuf(monitor=None):
+    monitor = monitor if monitor is not None else pointer_monitor()
     root = Gdk.get_default_root_window()
     if root is None:
         raise RuntimeError("无法访问桌面画面，请确认当前为 X11 会话")
-    pixbuf = Gdk.pixbuf_get_from_window(root, 0, 0, root.get_width(), root.get_height())
+    pixbuf = Gdk.pixbuf_get_from_window(root, *monitor_bounds(monitor))
     if pixbuf is None:
         raise RuntimeError("无法读取桌面画面，请确认当前为 X11 会话")
     return pixbuf
 
 
-def capture_screen():
-    return screen_pixbuf()
+def capture_screen(monitor=None):
+    return screen_pixbuf(monitor)
 
 
-def capture(rect, pix=None):
-    pix = pix or screen_pixbuf()
+def capture(rect, pix=None, bounds=None):
+    if pix is None:
+        monitor = pointer_monitor()
+        bounds = monitor_bounds(monitor)
+        pix = screen_pixbuf(monitor)
     x, y, w, h = rect
+    if bounds is not None:
+        if not region_within_bounds(rect, bounds):
+            raise ValueError("截图区域必须位于鼠标所在屏幕内，请重新框选")
+        # GDK geometry uses logical pixels; the pixbuf includes the root
+        # window's scale factor. Map both edges to retain the native resolution.
+        left, top, width, height = bounds
+        sx, sy = pix.get_width() / width, pix.get_height() / height
+        x1, y1 = round((x - left) * sx), round((y - top) * sy)
+        x2, y2 = round((x + w - left) * sx), round((y + h - top) * sy)
+        x, y, w, h = x1, y1, x2 - x1, y2 - y1
     crop = pix.new_subpixbuf(x, y, w, h).copy()
     crop.savev(str(CACHE), "png", [], [])
     return rect
@@ -315,13 +405,24 @@ def _run_tesseract(path, lang, psm, output=None, scale=None):
     with Image.open(path) as source:
         if scale is None:
             scale = _ocr_scale_for(source.width, source.height)
-        resized = source.convert("RGB").resize(
+        resized = ImageOps.grayscale(source).resize(
             (max(1, round(source.width * scale)),
              max(1, round(source.height * scale))),
             Image.LANCZOS,
         )
+    # A small sample keeps background detection cheap even for full screens.
+    # Tesseract expects dark glyphs on a light background.
+    sample = resized.resize((64, 64))
+    histogram = sample.histogram()
+    sample.close()
+    if sum(histogram[:100]) > sum(histogram) * 0.6:
+        inverted = ImageOps.invert(resized)
+        resized.close()
+        resized = inverted
+    padded = ImageOps.expand(resized, border=OCR_BORDER, fill=255)
     encoded = io.BytesIO()
-    resized.save(encoded, "PNG", dpi=(300, 300))
+    padded.save(encoded, "PNG", dpi=(300, 300))
+    padded.close()
     resized.close()
 
     env = os.environ.copy()
@@ -357,18 +458,26 @@ def _join_ocr_tokens(tokens):
     return joined
 
 
-def parse_ocr_paragraphs(path, lang="eng+chi_sim"):
-    """Run tesseract TSV and group words into paragraphs by block_num+par_num.
+def parse_ocr_paragraphs(path, lang=None):
+    """Run mixed-language TSV OCR and group words by paragraph and position.
 
-    Each paragraph gets its overall bounding box and multi-line text.  Columns
-    survive because --psm 3 gives distinct block_num to separate text blocks.
+    Each paragraph gets its overall bounding box and multi-line text. Distant
+    same-line labels are split even when --psm 3 assigns them a shared block.
     The same adaptive scale is used for OCR and for mapping boxes back to
     source coordinates.
     """
     with Image.open(path) as probe:
-        scale = _ocr_scale_for(probe.width, probe.height)
+        source_width, source_height = probe.size
+        scale = _ocr_scale_for(source_width, source_height)
+    lang = lang or OCR_LANG
     tsv = _run_tesseract(path, lang, OCR_PSM, "tsv", scale=scale)
     rows = list(csv.DictReader(io.StringIO(tsv), delimiter="\t"))
+    if (source_height <= 160 and
+            not any(row.get("text", "").strip() for row in rows)):
+        # Auto page segmentation can discard a small label/single text block.
+        # Retry only empty small captures, keeping full-page OCR to one pass.
+        tsv = _run_tesseract(path, lang, "6", "tsv", scale=scale)
+        rows = list(csv.DictReader(io.StringIO(tsv), delimiter="\t"))
     try:
         page_height = int(rows[0]["height"])
     except (IndexError, KeyError, ValueError):
@@ -383,13 +492,14 @@ def parse_ocr_paragraphs(path, lang="eng+chi_sim"):
             if not text or conf < 18:
                 continue
             if (text in {"|", "/", "1", "I", "l"} and
-                    left == 0 and top == 0 and page_height and
-                    height >= page_height * 0.8 and width * 2 < height):
+                    left <= OCR_BORDER and top <= OCR_BORDER and page_height and
+                    height >= (page_height - 2 * OCR_BORDER) * 0.8 and width * 2 < height):
                 continue
             words.append({
                 "block_num": int(row["block_num"]),
                 "par_num": int(row["par_num"]),
                 "line_num": int(row["line_num"]),
+                "word_num": int(row["word_num"]),
                 "left": left, "top": top, "width": width, "height": height,
                 "text": text,
             })
@@ -402,31 +512,68 @@ def parse_ocr_paragraphs(path, lang="eng+chi_sim"):
 
     line_items = []
     for (block_num, par_num, _line_num), ws in lines.items():
-        ws.sort(key=lambda w: w["left"])
-        line_items.append({
-            "block_num": block_num, "par_num": par_num,
-            "text": _join_ocr_tokens(w["text"] for w in ws),
-            "left": min(w["left"] for w in ws),
-            "top": min(w["top"] for w in ws),
-            "right": max(w["left"] + w["width"] for w in ws),
-            "bottom": max(w["top"] + w["height"] for w in ws),
-        })
+        # Tesseract may put distant diagram labels on the same line. Split
+        # at large gaps, while retaining word_num order: Chinese word boxes
+        # can overlap, so sorting them by x alone scrambles their characters.
+        ws.sort(key=lambda w: w["word_num"])
+        heights = sorted(w["height"] for w in ws)
+        if source_height <= 80:
+            # Short UI captures contain neighbouring buttons. Their gap is
+            # much smaller than the column gap in a paper, but larger than
+            # the space within labels such as "Sign in" and "Sign up".
+            gap_limit = max(10 * scale, heights[len(heights) // 2])
+        else:
+            gap_limit = max(32 * scale, 3 * heights[len(heights) // 2])
+        runs = [[]]
+        right = 0
+        for word in ws:
+            if runs[-1] and word["left"] - right > gap_limit:
+                runs.append([])
+            runs[-1].append(word)
+            right = max(w["left"] + w["width"] for w in runs[-1])
+        for run in runs:
+            line_items.append({
+                "block_num": block_num, "par_num": par_num,
+                "text": _join_ocr_tokens(w["text"] for w in run),
+                "left": min(w["left"] for w in run),
+                "top": min(w["top"] for w in run),
+                "right": max(w["left"] + w["width"] for w in run),
+                "bottom": max(w["top"] + w["height"] for w in run),
+            })
 
     paras = {}
     for li in line_items:
         paras.setdefault((li["block_num"], li["par_num"]), []).append(li)
 
     paragraphs = []
-    for (block_num, par_num), lis in paras.items():
+    groups = []
+    for lis in paras.values():
+        columns = []
+        for li in sorted(lis, key=lambda l: (l["top"], l["left"])):
+            for column in columns:
+                previous = column[-1]
+                overlap = min(li["right"], previous["right"]) - max(li["left"], previous["left"])
+                min_width = min(li["right"] - li["left"], previous["right"] - previous["left"])
+                if (overlap > min_width * 0.3 and
+                        li["top"] >= previous["bottom"] - scale * 4 and
+                        _needs_translation(li["text"]) == _needs_translation(previous["text"])):
+                    column.append(li)
+                    break
+            else:
+                columns.append([li])
+        groups.extend(columns)
+    for lis in groups:
         lis.sort(key=lambda l: (l["top"], l["left"]))
         left = min(l["left"] for l in lis)
         top = min(l["top"] for l in lis)
         right = max(l["right"] for l in lis)
         bottom = max(l["bottom"] for l in lis)
-        source_left = int(left / scale)
-        source_top = int(top / scale)
-        source_right = int(math.ceil(right / scale))
-        source_bottom = int(math.ceil(bottom / scale))
+        source_left = max(0, int((left - OCR_BORDER) / scale))
+        source_top = max(0, int((top - OCR_BORDER) / scale))
+        source_right = min(source_width, int(math.ceil((right - OCR_BORDER) / scale)))
+        source_bottom = min(source_height, int(math.ceil((bottom - OCR_BORDER) / scale)))
+        if source_right <= source_left or source_bottom <= source_top:
+            continue
         paragraphs.append({
             "text": "\n".join(l["text"] for l in lis),
             "box": (source_left, source_top,
@@ -495,73 +642,199 @@ def _warm_node(node):
         pass
 
 
-def _translate_remote(text):
-    """Translate one string via Mozhi without consulting the local cache.
+def _translate_on_node(node, engine, text):
+    """Perform one bounded request; called by a dedicated node worker."""
+    session = _tls_session()
+    response = session.get(
+        node + "/api/translate",
+        params={"from": SOURCE_LANG,
+                "to": ENGINE_TARGET.get(engine, "zh"),
+                "engine": engine, "text": text},
+        timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+    )
+    if response.status_code != 200:
+        logging.warning("translate http node=%s engine=%s status=%s",
+                        node, engine, response.status_code)
+        raise TranslationError("http %s" % response.status_code)
+    data = response.json()
+    value = (data.get("translated-text")
+             or data.get("translation")
+             or data.get("translatedText"))
+    if not value:
+        logging.warning("translate empty node=%s engine=%s", node, engine)
+        raise TranslationError("empty translation")
+    return value
 
-    Prefers the duckduckgo engine, caps total attempts at ``len(NODES) *
-    len(ENGINES)`` per request, and switches node quickly when a node is
-    unreachable.  Returns the translated text or raises TranslationError.  Log
-    lines carry host + engine + exception class only, never the source text or
-    a URL with a query string.
+
+def _translate_mymemory_segment(text):
+    response = _tls_session().get(
+        MYMEMORY_URL,
+        params={"q": text, "langpair": SOURCE_LANG + "|zh-CN"},
+        timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+    )
+    if response.status_code != 200:
+        raise TranslationError("MyMemory http %s" % response.status_code)
+    data = response.json()
+    if data.get("responseStatus") not in (None, 200):
+        raise TranslationError("MyMemory status %s" % data.get("responseStatus"))
+    value = (data.get("responseData") or {}).get("translatedText")
+    if not value or value == text:
+        raise TranslationError("MyMemory empty translation")
+    return html.unescape(value)
+
+
+def _translate_mymemory(text):
+    """Translate within the fallback's UTF-8 byte limit; retain batch markers."""
+    lines = text.splitlines()
+    marked = [re.fullmatch(r"(ZXQPX\d+ZX) (.+)", line) for line in lines]
+    if marked and all(marked):
+        return "\n".join(match.group(1) + " " + _translate_mymemory(match.group(2))
+                         for match in marked)
+    chunks = _split_translation_chunks(
+        text, fits=lambda value: len(value.encode("utf-8")) <= MYMEMORY_MAX_BYTES)
+    return _join_ocr_tokens(_translate_mymemory_segment(chunk) for chunk in chunks)
+
+
+def _translate_remote(text):
+    """Translate one string via Mozhi, then MyMemory as a last resort.
+
+    The preferred node is still tried first.  If it fails, the remaining
+    endpoints for that engine are raced in parallel, so a dead public node
+    cannot add one full timeout after another.  Log lines carry host + engine +
+    exception class only, never the source text or a URL with a query string.
     """
     global _last_good_node
-    s = _tls_session()
-    attempts = 0
-    for node in _ordered_nodes():
-        for engine in ENGINES:
-            attempts += 1
-            if attempts > MAX_ATTEMPTS_PER_PARAGRAPH:
-                raise TranslationError("attempts exhausted")
-            try:
-                # The desktop proxy (Clash) adds several seconds to the TLS
-                # handshake; a 2 s connect timeout aborts the handshake as a
-                # ProxyError and makes every node look unreachable.  Use
-                # generous timeouts so slow-but-working nodes succeed.
-                response = s.get(
-                    node + "/api/translate",
-                    params={"from": "auto",
-                            "to": ENGINE_TARGET.get(engine, "zh"),
-                            "engine": engine, "text": text},
-                    timeout=(10, 25),
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    value = (data.get("translated-text")
-                             or data.get("translation")
-                             or data.get("translatedText"))
-                    if value:
-                        _last_good_node = node
-                        _node_ok(node)
-                        return value
-                    logging.warning("translate empty node=%s engine=%s", node, engine)
+    nodes = _ordered_nodes()
+    if not nodes:
+        raise TranslationError("no translation nodes configured")
+
+    for engine in ENGINES:
+        preferred = nodes[0]
+        try:
+            value = _translate_on_node(preferred, engine, text)
+        except Exception as exc:
+            logging.warning("translate request error node=%s engine=%s exc=%s",
+                            preferred, engine, exc.__class__.__name__)
+            if isinstance(exc, (requests.exceptions.ConnectTimeout,
+                                requests.exceptions.ConnectionError,
+                                requests.exceptions.ReadTimeout,
+                                requests.exceptions.SSLError,
+                                requests.exceptions.ProxyError)):
+                _node_failed(preferred)
+        else:
+            _last_good_node = preferred
+            _node_ok(preferred)
+            return value
+
+        # The first node failed.  Race the other nodes instead of waiting for
+        # them serially.  Cancel only prevents queued work; in-flight requests
+        # remain bounded by CONNECT_TIMEOUT/READ_TIMEOUT and use daemon workers.
+        remaining = [node for node in nodes[1:] if _node_available(node)]
+        futures = {_node_executor.submit(_translate_on_node, node, engine, text): node
+                   for node in remaining}
+        while futures:
+            done, _ = wait(list(futures), return_when=FIRST_COMPLETED)
+            for future in done:
+                node = futures.pop(future)
+                try:
+                    value = future.result()
+                except Exception as exc:
+                    logging.warning("translate request error node=%s engine=%s exc=%s",
+                                    node, engine, exc.__class__.__name__)
+                    if isinstance(exc, (requests.exceptions.ConnectTimeout,
+                                        requests.exceptions.ConnectionError,
+                                        requests.exceptions.ReadTimeout,
+                                        requests.exceptions.SSLError,
+                                        requests.exceptions.ProxyError)):
+                        _node_failed(node)
                 else:
-                    logging.warning("translate http node=%s engine=%s status=%s",
-                                    node, engine, response.status_code)
-            except requests.exceptions.RequestException as exc:
-                logging.warning("translate request error node=%s engine=%s exc=%s",
-                                node, engine, exc.__class__.__name__)
-                if isinstance(exc, (requests.exceptions.ConnectTimeout,
-                                    requests.exceptions.ConnectionError,
-                                    requests.exceptions.ReadTimeout,
-                                    requests.exceptions.SSLError)):
-                    # node unreachable/slow: switch node instead of burning tries
-                    _node_failed(node)
-                    break
-            except Exception as exc:
-                logging.warning("translate error node=%s engine=%s exc=%s",
-                                node, engine, exc.__class__.__name__)
-    raise TranslationError("all translation services unavailable")
+                    for pending in futures:
+                        pending.cancel()
+                    _last_good_node = node
+                    _node_ok(node)
+                    return value
+
+    try:
+        value = _translate_mymemory(text)
+    except Exception as exc:
+        logging.warning("MyMemory fallback failed exc=%s", exc.__class__.__name__)
+        raise TranslationError("all translation services unavailable") from exc
+    logging.info("translation fallback=MyMemory")
+    return value
 
 
 def _clean_ocr_text(text):
     """Undo PDF line wrapping before sending OCR text for translation."""
-    text = re.sub(r"(?<=\w)-\s*\n\s*(?=\w)", "", text)
-    return _join_ocr_tokens(re.split(r"[ \t]*\n[ \t]*", text))
+    text = re.sub(r"\u00ad\s*\n\s*", "", text)
+    text = unicodedata.normalize("NFC", text).replace("\u00ad", "")
+    text = text.replace("\ufb00", "ff").replace("\ufb01", "fi").replace("\ufb02", "fl")
+    text = text.replace("\ufb03", "ffi").replace("\ufb04", "ffl")
+    def unwrap_word(match):
+        word = match.group(1)
+        # Preserve clear compound prefixes and an existing compound chain.
+        # Ordinary PDF word fragments such as "trans-\nlation" are rejoined.
+        compound = ("-" in word or word.lower() in {
+            "self", "well", "cross", "non", "multi", "quasi", "semi",
+        })
+        return word + ("-" if compound else "")
+    text = re.sub(r"([A-Za-z]+(?:-[A-Za-z]+)*)-\s*\n\s*(?=[A-Za-z])",
+                  unwrap_word, text)
+    text = _join_ocr_tokens(re.split(r"[ \t]*\n[ \t]*", text))
+    text = re.sub(r"\s+", " ", text).strip()
+    # Repair OCR token spacing in contractions and possessives without
+    # guessing at technical terms, identifiers, or ordinary spelling.
+    text = re.sub(r"(?<=[A-Za-z])[ \t]*(['’])[ \t]*(s|t|re|ve|ll|d|m)\b",
+                  r"\1\2", text, flags=re.IGNORECASE)
+    # The worker also does this for callers that bypass screenshot OCR.
+    # Keep malformed glossary errors in the translation error path.
+    if TRANSLATION_BACKEND == "local":
+        try:
+            text = local_translation.repair_ocr(text)
+        except local_translation.LocalTranslationError:
+            pass
+    return text
 
 
 def _encoded_len(text):
     """Percent-encoded URL length of a query value (requests' encoding)."""
     return len(urlencode({"text": text}))
+
+
+_HAN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
+_TECHNICAL = local_translation.TECHNICAL
+
+
+def _prepare_translation(text):
+    """Protect code names and acronyms in English prose with checked tokens."""
+    terms = []
+
+    def protect(match):
+        token = "QZXTERM%dZXQ" % len(terms)
+        terms.append(match.group())
+        return token
+
+    return _TECHNICAL.sub(protect, _clean_ocr_text(text)), terms
+
+
+def _restore_terms(value, terms):
+    for index, term in enumerate(terms):
+        pattern = re.compile(r"QZXTERM\s*%d\s*ZXQ" % index, re.IGNORECASE)
+        if len(pattern.findall(value)) != 1:
+            raise TranslationError("technical terms were not preserved")
+        value = pattern.sub(lambda _match: term, value)
+    if re.search(r"QZXTERM\s*\d+\s*ZXQ", value, re.IGNORECASE):
+        raise TranslationError("unexpected technical term marker")
+    return value
+
+
+def _needs_translation(text):
+    # Chinese paragraphs (including their embedded technical vocabulary) are
+    # already readable. Never send them as English to a translation service.
+    # Pure identifiers, numbers and icon glyphs also retain their source pixels.
+    text = _clean_ocr_text(text)
+    if TRANSLATION_BACKEND == "local" and local_translation.preserves_text(text):
+        return False
+    return not _HAN.search(text) and bool(re.search(r"[A-Za-z]", _TECHNICAL.sub("", text)))
 
 
 def _fits_batch(text):
@@ -582,17 +855,30 @@ def _max_fit_len(text, cap):
     return lo
 
 
-def _split_translation_chunks(text):
+def _split_translation_chunks(text, fits=None):
     """Split long prose near sentence/word boundaries under the API limits."""
     text = _clean_ocr_text(text)
-    if _fits_batch(text):
+    fits = fits or _fits_batch
+    if fits(text):
         return [text]
     chunks = []
-    while text and not _fits_batch(text):
-        max_fit = _max_fit_len(text, BATCH_MAX_CHARS)
-        window = text[:max_fit + 1]
-        cuts = [window.rfind(token) for token in (". ", "? ", "! ", "; ", ": ")]
-        cut = max(cuts)
+    while text and not fits(text):
+        lo, hi = 0, len(text)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if fits(text[:mid]):
+                lo = mid
+            else:
+                hi = mid - 1
+        max_fit = lo
+        if not max_fit:
+            raise TranslationError("translation limit too small for one character")
+        window = text[:max_fit]
+        # Keep punctuation with its sentence; the old split left it at the
+        # beginning of the next request. Avoid decimal/URL dots and initials.
+        cuts = [match.end() for match in re.finditer(
+            r"(?<!\b[A-Z])[.!?][\"'”’)]*(?=\s|$)|[。！？；;:]", window)]
+        cut = max(cuts, default=0)
         if cut < max_fit // 2:
             cut = window.rfind(" ")
             if cut < max_fit // 2:
@@ -609,10 +895,23 @@ def _split_translation_chunks(text):
 
 
 def translate_paragraph(text):
+    if not _needs_translation(text):
+        return text
     cached = cache_get(text)
     if cached is not None:
         return cached
-    chunks = _split_translation_chunks(text)
+    if TRANSLATION_BACKEND == "local":
+        if SOURCE_LANG != "en":
+            raise local_translation.LocalTranslationError("本地模型只支持英文→简体中文。")
+        value = _local_client.translate(_clean_ocr_text(text))
+        if not value or not _HAN.search(value):
+            raise local_translation.LocalTranslationError("本地模型未生成中文译文，请检查识别内容或缩小选区。")
+        cache_set(text, value)
+        return value
+    if TRANSLATION_BACKEND != "remote":
+        raise TranslationError("unknown translation backend: %s" % TRANSLATION_BACKEND)
+    prepared, terms = _prepare_translation(text)
+    chunks = _split_translation_chunks(prepared)
     if len(chunks) == 1:
         value = _translate_remote(chunks[0])
     else:
@@ -621,28 +920,30 @@ def translate_paragraph(text):
                    for i, chunk in enumerate(chunks)}
         for future in as_completed(futures):
             translated[futures[future]] = future.result()
-        value = " ".join(translated)
+        value = _join_ocr_tokens(translated)
+    value = _restore_terms(value, terms)
     cache_set(text, value)
     return value
 
 
 def _batch_item_size(text):
     """Approx URL size of one batched paragraph, including its marker prefix."""
-    return _encoded_len("ZXQPX0ZX " + _clean_ocr_text(text))
+    return _encoded_len("ZXQPX0ZX " + _prepare_translation(text)[0])
 
 
 def _make_batches(pending, texts):
     batches = []
     current = []
-    current_size = 0
+    current_text = ""
     for index in pending:
-        item_size = _batch_item_size(texts[index])
-        if current and current_size + item_size > BATCH_MAX_URL:
+        item = "ZXQPX%dZX %s" % (index, _prepare_translation(texts[index])[0])
+        combined = current_text + "\n" + item if current else item
+        if current and not _fits_batch(combined):
             batches.append(current)
             current = []
-            current_size = 0
+            current_text = ""
         current.append(index)
-        current_size += item_size
+        current_text = current_text + "\n" + item if current_text else item
     if current:
         batches.append(current)
     return batches
@@ -650,14 +951,18 @@ def _make_batches(pending, texts):
 
 def _translate_batch(indices, texts):
     """Translate several paragraphs in one round trip and split by markers."""
-    combined = "\n".join("ZXQPX%dZX %s" % (i, _clean_ocr_text(texts[i]))
+    prepared = {i: _prepare_translation(texts[i]) for i in indices}
+    if len(indices) == 1:
+        index = indices[0]
+        value = _translate_remote(prepared[index][0])
+        return {index: _restore_terms(value, prepared[index][1])}
+    combined = "\n".join("ZXQPX%dZX %s" % (i, prepared[i][0])
                          for i in indices)
     output = _translate_remote(combined)
-    pattern = re.compile(r"ZXQPX(\d+)ZX")
+    pattern = re.compile(r"ZXQPX\s*(\d+)\s*ZX", re.IGNORECASE)
     markers = list(pattern.finditer(output))
-    expected = set(indices)
-    found = {int(match.group(1)) for match in markers}
-    if found != expected:
+    found = [int(match.group(1)) for match in markers]
+    if found != indices or output[:markers[0].start()].strip():
         raise TranslationError("batch markers were not preserved")
     values = {}
     for pos, match in enumerate(markers):
@@ -666,7 +971,7 @@ def _translate_batch(indices, texts):
         value = output[match.end():end].strip()
         if not value:
             raise TranslationError("empty batch paragraph")
-        values[index] = value
+        values[index] = _restore_terms(value, prepared[index][1])
     return values
 
 
@@ -677,6 +982,20 @@ def translate_paragraphs(texts, on_progress=None):
     Mozhi request; if markers are changed or the request fails, only that batch
     falls back to the existing concurrent paragraph requests.
     """
+    global _local_error
+    if TRANSLATION_BACKEND == "local":
+        _local_error = ""
+        results = []
+        for i, text in enumerate(texts):
+            try:
+                results.append(translate_paragraph(text))
+            except Exception as exc:
+                logging.warning("local paragraph %d failed: %s", i, str(exc))
+                _local_error = str(exc)
+                results.append(None)
+            if on_progress:
+                on_progress(i + 1, len(texts))
+        return results
     results = [None] * len(texts)
     total = len(texts)
     done = 0
@@ -689,6 +1008,10 @@ def translate_paragraphs(texts, on_progress=None):
             on_progress(done, total)
 
     for i, text in enumerate(texts):
+        if not _needs_translation(text):
+            results[i] = text
+            progress()
+            continue
         cached = cache_get(text)
         if cached is None:
             pending.append(i)
@@ -700,7 +1023,7 @@ def translate_paragraphs(texts, on_progress=None):
     # encoded) must be split into sentence-sized requests; never send it as a
     # single GET query (Mozhi/Bing returns HTTP 500, proxies return 431/414).
     unresolved = [i for i in pending
-                  if not _fits_batch(_clean_ocr_text(texts[i]))]
+                  if not _fits_batch("ZXQPX%dZX %s" % (i, _prepare_translation(texts[i])[0]))]
     unresolved_set = set(unresolved)
     short_pending = [i for i in pending if i not in unresolved_set]
     batches = _make_batches(short_pending, texts)
@@ -882,12 +1205,11 @@ def validate_layout(layouts, image_size):
 
 
 def place_paragraphs(paragraphs, translated, font_size, canvas, grow=False):
-    """Lay out every translated paragraph with per-column vertical stacking.
+    """Replace changed text at its anchor, reserving all other source text.
 
-    A box is anchored at its original paragraph's top-left (same column x, no
-    horizontal drift) and is only pushed down when it would overlap an already
-    placed box.  Returns (layouts, canvas).  Raises LayoutError when a box
-    cannot fit in the canvas and font reduction is still allowed (grow=False).
+    Bottom overflow can grow the replacement at its anchor. In the growing
+    layout, translated paragraphs can move down together. Unchanged labels
+    stay reserved; translations that cannot fit around them appear below.
     """
     img_w, img_h = canvas
     f = font(font_size)
@@ -895,31 +1217,33 @@ def place_paragraphs(paragraphs, translated, font_size, canvas, grow=False):
     line_h = ascent + descent + 2
     probe = ImageDraw.Draw(Image.new("RGB", (1, 1)))
 
-    columns = detect_columns(paragraphs)
-    col_right = {}
-    for col in columns:
-        for i in col["indices"]:
-            col_right[i] = col["right"]
-
     # reading order: top to bottom, then left to right
     global_order = sorted(range(len(paragraphs)),
                           key=lambda i: (paragraphs[i]["box"][1], paragraphs[i]["box"][0]))
 
     placed = []                 # every placed rect, across all columns
-    layouts = [None] * len(paragraphs)
+    layouts = []
     out_h = img_h
+    changed = {i for i, text in enumerate(translated)
+               if text and _clean_ocr_text(text) != _clean_ocr_text(paragraphs[i]["text"])}
 
     for i in global_order:
         para = paragraphs[i]
+        if i not in changed:
+            continue
         x, y, ow, oh = para["box"]
-        out_text = (translated[i] or para["text"]).strip()
-        # cap width to the column's horizontal extent so the box never drifts
-        # across a column boundary, and never beyond what the canvas box can
-        # hold: otherwise box_w is clamped to img_w below while the lines were
-        # wrapped to a larger max_text_width, and validate_layout rejects the
-        # horizontally-clipped result.
-        avail_w = max(40, min(img_w - x - PAD_H, col_right[i] - x - PAD_H))
-        max_text_width = min(max(ow, 100), avail_w, img_w - 2 * PAD_H)
+        out_text = translated[i].strip()
+        other_sources = [p["box"] for j, p in enumerate(paragraphs) if j != i]
+        bx = max(0, x - PAD_H)
+        by = max(0, y - PAD_V)
+        right_limit = img_w
+        for sx, sy, sw, sh in other_sources:
+            if sx >= x + ow and sy < y + max(oh, line_h) + PAD_V and sy + sh > by:
+                right_limit = min(right_limit, sx - BOX_GAP)
+        avail_w = right_limit - bx - 2 * PAD_H
+        natural_w = math.ceil(max(probe.textlength(line, font=f)
+                                  for line in out_text.split("\n")))
+        max_text_width = max(1, min(max(ow, natural_w), avail_w))
         lines = wrap_text_by_pixels(out_text, f, max_text_width, probe)
         content_h = line_h * len(lines)
         box_w = min(max_text_width + 2 * PAD_H, img_w)
@@ -928,32 +1252,44 @@ def place_paragraphs(paragraphs, translated, font_size, canvas, grow=False):
         # below the overlay and looks like overlapping text.
         box_h = max(content_h, oh) + 2 * PAD_V
 
-        bx = max(0, min(x - PAD_H, img_w - box_w))
-        by = max(0, y - PAD_V)
+        if grow:
+            # Changed source text is erased before rendering. It can safely
+            # be used for the preceding translation and reflowed below it.
+            other_sources = [p["box"] for j, p in enumerate(paragraphs) if j != i and j not in changed]
+            while _overlaps_any((bx, by, box_w, box_h), placed):
+                by = max(py + ph + BOX_GAP for px, py, pw, ph in placed
+                         if _overlaps_any((bx, by, box_w, box_h), [(px, py, pw, ph)]))
 
-        # vertical collision: smallest y >= anchor that clears placed boxes
-        yy = by
-        guard = 0
-        while _overlaps_any((bx, yy, box_w, box_h), placed) and guard < 1_000_000:
-            yy += BOX_GAP
-            guard += 1
-        if guard >= 1_000_000:
-            raise LayoutError("could not place paragraph %d without overlap" % i)
-        if yy + box_h > out_h:
-            if font_size > MIN_FONT_SIZE and not grow:
-                raise LayoutError("cannot fit at font %d" % font_size)
-            out_h = yy + box_h
+        # A source at the image edge can extend beyond the padded *text*
+        # width while still being fully covered by the replacement rectangle.
+        # Check the actual rectangle, not its inner text width.
+        detached = (bx + box_w < x + ow or bx + box_w > img_w or
+                    _overlaps_any((bx, by, box_w, box_h), other_sources + placed))
+        if not detached and by + box_h > img_h:
+            if not grow:
+                raise LayoutError("replacement needs more canvas height at font %d" % font_size)
+            out_h = max(out_h, by + box_h)
+        if detached:
+            if not grow:
+                raise LayoutError("replacement would cover source text at font %d" % font_size)
+            bx, by = 0, out_h + BOX_GAP
+            max_text_width = max(1, img_w - 2 * PAD_H)
+            lines = wrap_text_by_pixels(out_text, f, max_text_width, probe)
+            box_w = img_w
+            box_h = line_h * len(lines) + 2 * PAD_V
+            out_h = by + box_h
 
-        layouts[i] = {
+        layouts.append({
             "text": out_text,
             "orig": (x, y, ow, oh),
             "lines": lines,
-            "rect": (bx, yy, box_w, box_h),
+            "rect": (bx, by, box_w, box_h),
             "font": f,
             "font_size": font_size,
             "line_h": line_h,
-        }
-        placed.append((bx, yy, box_w, box_h))
+            "detached": detached,
+        })
+        placed.append((bx, by, box_w, box_h))
 
     return layouts, (img_w, out_h)
 
@@ -961,8 +1297,9 @@ def place_paragraphs(paragraphs, translated, font_size, canvas, grow=False):
 def calculate_layout(paragraphs, translated, img_size, start_size=None):
     """Full layout: try unified font 18 -> 16 -> 14, then grow the canvas.
 
-    Returns (layouts, canvas).  Overlap is never allowed; only at the minimum
-    font size is the canvas height grown to fit genuinely overflowing boxes.
+    Returns (layouts, canvas). Only changed paragraphs get boxes. At the
+    minimum font size, reflow translated paragraphs downward. Labels that
+    remain unchanged are reserved; crowded translations go below the image.
     """
     size = start_size or TRANSLATION_FONT_SIZE
     canvas = tuple(img_size)
@@ -982,7 +1319,7 @@ def calculate_layout(paragraphs, translated, img_size, start_size=None):
             # minimum font size: grow the canvas instead of overlapping
             layouts, canvas = place_paragraphs(paragraphs, translated, size, canvas, grow=True)
             canvas = (canvas[0], max(canvas[1],
-                                     max(l["rect"][1] + l["rect"][3] for l in layouts)))
+                                     max((l["rect"][1] + l["rect"][3] for l in layouts), default=canvas[1])))
             ok, reason = validate_layout(layouts, canvas)
             if not ok:
                 raise RuntimeError("layout cannot be made valid: %s" % reason)
@@ -1004,31 +1341,51 @@ def _grow_canvas(image, canvas):
 
 
 def render_translation(paragraphs, translated, source=None, start_size=None):
-    """Render all translated paragraphs into the captured image.
+    """Render changed paragraphs without covering preserved source content.
 
     All paragraphs share one font size (18 default; 16 or 14 for the whole image
-    when needed).  Each box gets a light semi-transparent background; boxes never
-    overlap and the final layout is validated before drawing.  Returns the
+    when needed). Replacement backgrounds follow the source theme; boxes never
+    overlap and the final layout is validated before drawing. Returns the
     output PNG path.
     """
-    image = Image.open(source or CACHE).convert("RGB")
-    layouts, canvas = calculate_layout(paragraphs, translated, image.size, start_size)
-    image = _grow_canvas(image, canvas)
+    global RESULT_FOCUS_Y
+    source_image = Image.open(source or CACHE).convert("RGB")
+    layouts, canvas = calculate_layout(paragraphs, translated, source_image.size, start_size)
+    image = _grow_canvas(source_image.copy(), canvas)
 
     ok, reason = validate_layout(layouts, canvas)
     if not ok:
         raise RuntimeError("refusing to draw invalid layout: %s" % reason)
 
     draw = ImageDraw.Draw(image, "RGBA")
+    backgrounds = []
+    # Erase all successfully translated originals first, including paragraphs
+    # that moved. Otherwise their English source would remain above the output.
     for lay in layouts:
+        sx, sy, sw, sh = lay["orig"]
+        samples = [source_image.getpixel((min(source_image.width - 1, max(0, px)),
+                                         min(source_image.height - 1, max(0, py))))
+                   for px in (sx - 2, sx + sw // 2, sx + sw + 2)
+                   for py in (sy - 2, sy + sh + 2)]
+        background = sorted(samples, key=lambda c: sum(c))[len(samples) // 2]
+        backgrounds.append(background)
+        draw.rectangle((sx, sy, sx + sw - 1, sy + sh - 1), fill=background + (255,))
+    changed_boxes = {lay["orig"] for lay in layouts}
+    for para in paragraphs:
+        if tuple(para["box"]) not in changed_boxes:
+            sx, sy, sw, sh = para["box"]
+            image.paste(source_image.crop((sx, sy, sx + sw, sy + sh)), (sx, sy))
+    for lay, background in zip(layouts, backgrounds):
         x, y, w, h = lay["rect"]
-        draw.rounded_rectangle((x, y, x + w, y + h), radius=4, fill=(255, 255, 255, 255))
+        foreground = (240, 240, 240) if sum(background) < 384 else (25, 25, 25)
+        draw.rectangle((x, y, x + w - 1, y + h - 1), fill=background + (255,))
         ty = y + PAD_V
         for line in lay["lines"]:
-            draw.text((x + PAD_H, ty), line, font=lay["font"], fill=(25, 25, 25, 255))
+            draw.text((x + PAD_H, ty), line, font=lay["font"], fill=foreground + (255,))
             ty += lay["line_h"]
     out = ROOT / "translated.png"
     image.save(out)
+    RESULT_FOCUS_Y = min((lay["rect"][1] for lay in layouts), default=0)
     return out
 
 
@@ -1036,13 +1393,38 @@ def render_translation(paragraphs, translated, source=None, start_size=None):
 # GUI: selector, progress, result, settings
 # ---------------------------------------------------------------------------
 
+def show_on_monitor(window, monitor):
+    """Give the window manager an explicit position on the capture monitor."""
+    area = monitor.get_workarea()
+    window.set_position(Gtk.WindowPosition.NONE)
+    window.get_child().show_all()
+    _minimum, natural = window.get_preferred_size()
+    default_width, default_height = window.get_default_size()
+    width = min(max(default_width, natural.width), max(1, area.width - 48))
+    height = min(max(default_height, natural.height), max(1, area.height - 48))
+    window.set_default_size(width, height)
+    window.move(area.x + (area.width - width) // 2,
+                area.y + (area.height - height) // 2)
+
+    def center(mapped_window, _event):
+        width, height = mapped_window.get_size()
+        mapped_window.move(area.x + max(0, (area.width - width) // 2),
+                           area.y + max(0, (area.height - height) // 2))
+        return False
+
+    window.connect("map-event", center)
+    window.show_all()
+
+
 class Selector(Gtk.Window):
-    def __init__(self, screenshot, callback):
+    def __init__(self, screenshot, callback, monitor=None):
         super().__init__(type=Gtk.WindowType.TOPLEVEL)
         # Paint a frozen screenshot as the window background.  Relying on an
         # RGBA/transparent toplevel produces an opaque black window on some
         # GNOME/X11 compositing configurations.
         self.screenshot = screenshot
+        self.monitor = monitor if monitor is not None else pointer_monitor()
+        self.bounds = monitor_bounds(self.monitor)
         self.callback = callback
         self.start = None
         self.end = None
@@ -1052,7 +1434,12 @@ class Selector(Gtk.Window):
         self.set_keep_above(True)
         self.set_accept_focus(True)
         self.set_modal(True)
-        self.fullscreen()
+        x, y, width, height = self.bounds
+        self.move(x, y)
+        self.set_default_size(width, height)
+        screen = self.get_screen()
+        monitor_index = screen.get_monitor_at_point(x + width // 2, y + height // 2)
+        self.fullscreen_on_monitor(screen, monitor_index)
         self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK | Gdk.EventMask.POINTER_MOTION_MASK)
         self.connect("draw", self.draw_overlay)
         self.connect("button-press-event", self.press)
@@ -1089,29 +1476,32 @@ class Selector(Gtk.Window):
         return True
 
     def press(self, _widget, event):
-        self.start = (int(event.x), int(event.y))
+        self.start = self.event_point(event)
         self.end = self.start
         self.queue_draw()
         return True
 
     def motion(self, _widget, event):
         if self.start:
-            self.end = (int(event.x), int(event.y))
+            self.end = self.event_point(event)
             self.queue_draw()
         return True
+
+    def event_point(self, event):
+        allocation = self.get_allocation()
+        return (min(allocation.width, max(0, int(event.x))),
+                min(allocation.height, max(0, int(event.y))))
 
     def release(self, _widget, event):
         if not self.start:
             return True
-        self.end = (int(event.x), int(event.y))
-        x1, y1 = self.start
-        x2, y2 = self.end
-        rect = (min(x1, x2), min(y1, y2), abs(x2 - x1), abs(y2 - y1))
+        self.end = self.event_point(event)
+        rect = selection_region(self.start, self.end, self.get_allocation(), self.bounds)
+        self.destroy()
         if rect[2] >= 8 and rect[3] >= 8:
             self.callback(rect)
         else:
             Gtk.main_quit()
-        self.destroy()
         return True
 
     def draw_overlay(self, _widget, cr):
@@ -1145,8 +1535,9 @@ class Selector(Gtk.Window):
 class ProgressWindow(Gtk.Window):
     """Non-blocking progress window updated from the worker thread via GLib.idle_add."""
 
-    def __init__(self):
+    def __init__(self, monitor=None):
         super().__init__(title="截图翻译")
+        self.monitor = monitor if monitor is not None else pointer_monitor()
         self.cancelled = False
         self.set_decorated(False)
         self.set_keep_above(True)
@@ -1162,8 +1553,7 @@ class ProgressWindow(Gtk.Window):
         box.pack_start(self.label, True, True, 0)
         box.pack_start(self.spinner, False, False, 0)
         self.add(box)
-        self.set_position(Gtk.WindowPosition.CENTER)
-        self.show_all()
+        show_on_monitor(self, self.monitor)
         self.present()
         self.grab_focus()
 
@@ -1188,36 +1578,79 @@ class ProgressWindow(Gtk.Window):
         return self.cancelled
 
 
-def show_progress():
-    return ProgressWindow()
+def show_progress(monitor=None):
+    return ProgressWindow(monitor)
 
 
 class ResultWindow(Gtk.Window):
-    def __init__(self, rect, translated_text):
+    def __init__(self, rect, translated_text, monitor=None):
         super().__init__(title="截图翻译")
+        self.monitor = monitor if monitor is not None else pointer_monitor()
         self.rect = rect
         self.translated_text = translated_text
+        area = self.monitor.get_workarea()
+        viewport_width = min(rect[2], max(1, area.width - 48))
+        viewport_height = min(rect[3], max(1, area.height - 100))
         self.set_keep_above(True)
         self.set_type_hint(Gdk.WindowTypeHint.UTILITY)
-        self.set_default_size(min(1100, max(520, rect[2])), min(800, max(260, rect[3] + 48)))
         self.connect("destroy", Gtk.main_quit)
         self.connect("key-press-event", self.key)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        bar = Gtk.Box(spacing=6)
-        for label, action in [("提取中文", self.extract_zh), ("提取英文", self.extract_en), ("重新框选", self.reselect), ("快捷键设置", self.settings), ("复制翻译", self.copy_translation)]:
-            button = Gtk.Button(label=label)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        bar = Gtk.Box(spacing=4)
+        menu = Gtk.Menu()
+        for label, action in [("提取中文", self.extract_zh), ("提取英文", self.extract_en),
+                              ("重新框选", self.reselect), ("快捷键设置", self.settings),
+                              ("复制翻译", self.copy_translation)]:
+            item = Gtk.MenuItem(label=label)
+            item.connect("activate", lambda _item, fn=action: fn())
+            menu.append(item)
+        menu.show_all()
+        menu_button = Gtk.MenuButton(label="操作 ▾") if viewport_width >= 100 else Gtk.MenuButton()
+        menu_button.set_popup(menu)
+        bar.pack_start(menu_button, False, False, 0)
+        for icon, label, action in [("view-refresh-symbolic", "重新框选（Ctrl+Alt+O）", self.reselect),
+                                    ("edit-copy-symbolic", "复制翻译", self.copy_translation)]:
+            if viewport_width < 200:
+                continue
+            button = Gtk.Button.new_from_icon_name(icon, Gtk.IconSize.BUTTON)
+            button.set_tooltip_text(label)
             button.connect("clicked", lambda _b, fn=action: fn())
-            bar.pack_start(button, False, False, 4)
-        hint = Gtk.Label(label="Ctrl+Alt+O：重新框选截图    Esc：关闭")
-        bar.pack_end(hint, False, False, 8)
+            bar.pack_start(button, False, False, 0)
+        bar.set_tooltip_text("Ctrl+Alt+O：重新框选截图；Esc：关闭")
         box.pack_start(bar, False, False, 0)
-        image = Gtk.Image.new_from_file(str(ROOT / "translated.png"))
+        # Match the viewport to the logical capture dimensions; do not let
+        # a long toolbar or the image's HiDPI pixel dimensions enlarge it.
+        pixbuf = GdkPixbuf.Pixbuf.new_from_file(str(ROOT / "translated.png"))
+        image_scale = rect[2] / pixbuf.get_width()
+        if pixbuf.get_width() != rect[2]:
+            pixbuf = pixbuf.scale_simple(rect[2], max(1, round(pixbuf.get_height() * rect[2] / pixbuf.get_width())),
+                                        GdkPixbuf.InterpType.BILINEAR)
+        image = Gtk.Image.new_from_pixbuf(pixbuf)
+        image.set_valign(Gtk.Align.START)
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_min_content_width(viewport_width)
+        scroll.set_min_content_height(viewport_height)
         scroll.add(image)
+        # GTK learns the image height during allocation. Position the first
+        # view at translated content, including a fallback below the capture.
+        focused = False
+
+        def focus_translation(_widget, _allocation):
+            nonlocal focused
+            if not focused:
+                focused = True
+                adjustment = scroll.get_vadjustment()
+                adjustment.set_value(max(0, min(RESULT_FOCUS_Y * image_scale - 8,
+                                               adjustment.get_upper() - adjustment.get_page_size())))
+
+        scroll.connect("size-allocate", focus_translation)
         box.pack_start(scroll, True, True, 0)
         self.add(box)
-        self.show_all()
+        bar.show_all()
+        _minimum, toolbar_size = bar.get_preferred_size()
+        self.set_default_size(viewport_width, viewport_height + toolbar_size.height)
+        show_on_monitor(self, self.monitor)
         self.present()
 
     def key(self, _widget, event):
@@ -1249,8 +1682,8 @@ class ResultWindow(Gtk.Window):
         subprocess.Popen([sys.executable, str(Path(__file__)), "--settings"])
 
 
-def show_result(rect, translated_text):
-    ResultWindow(rect, translated_text)
+def show_result(rect, translated_text, monitor=None):
+    ResultWindow(rect, translated_text, monitor)
 
 
 def show_friendly_error(message="翻译服务暂时无法连接，请稍后重试。截图和文字识别已经完成。",
@@ -1261,6 +1694,7 @@ def show_friendly_error(message="翻译服务暂时无法连接，请稍后重�
             progress.destroy()
         dialog = Gtk.MessageDialog(None, 0, Gtk.MessageType.ERROR, Gtk.ButtonsType.CLOSE, "截图翻译失败")
         dialog.format_secondary_text(message)
+        show_on_monitor(dialog, progress.monitor if progress is not None else pointer_monitor())
         dialog.run()
         dialog.destroy()
         Gtk.main_quit()
@@ -1271,6 +1705,7 @@ def show_friendly_error(message="翻译服务暂时无法连接，请稍后重�
 def show_busy_dialog():
     dialog = Gtk.MessageDialog(None, 0, Gtk.MessageType.INFO, Gtk.ButtonsType.CLOSE, "截图翻译")
     dialog.format_secondary_text("已有截图翻译任务正在进行，请稍候再试。")
+    show_on_monitor(dialog, pointer_monitor())
     dialog.run()
     dialog.destroy()
 
@@ -1303,6 +1738,9 @@ class SettingsWindow(Gtk.Window):
         self.connect("destroy", Gtk.main_quit)
         self.connect("key-press-event", self.key)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        backend_hint = ("翻译方式：本地英→中 · 机器人／机械术语增强"
+                        if TRANSLATION_BACKEND == "local" else "翻译方式：在线英→中")
+        box.pack_start(Gtk.Label(label=backend_hint, xalign=0), False, False, 0)
         box.pack_start(Gtk.Label(label="快捷键（例如 Ctrl+Alt+O）", xalign=0), False, False, 0)
         self.entry = Gtk.Entry()
         current = subprocess.run(["gsettings", "get", "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:" + KEYBINDING_PATH, "binding"], text=True, stdout=subprocess.PIPE).stdout.strip().strip("'")
@@ -1321,7 +1759,7 @@ class SettingsWindow(Gtk.Window):
         box.pack_start(buttons, False, False, 0)
         box.pack_start(Gtk.Label(label="按快捷键后框选要识别和翻译的区域；按 Esc 可随时取消。", xalign=0), False, False, 0)
         self.add(box)
-        self.show_all()
+        show_on_monitor(self, pointer_monitor())
 
     def key(self, _widget, event):
         if event.keyval == Gdk.KEY_Escape:
@@ -1366,7 +1804,7 @@ class SettingsWindow(Gtk.Window):
 # pipeline
 # ---------------------------------------------------------------------------
 
-def process(rect, pix=None, progress=None, lock=None):
+def process(rect, pix=None, progress=None, lock=None, bounds=None, monitor=None):
     """Capture -> OCR -> translate -> layout -> render, off the GTK main thread.
 
     GTK widgets are only touched through GLib.idle_add().  Partial translation
@@ -1382,7 +1820,7 @@ def process(rect, pix=None, progress=None, lock=None):
         release_task_lock(lock)
         if progress is not None:
             progress.destroy()
-        show_result(rect, translated_text)
+        show_result(rect, translated_text, monitor)
         return False
 
     def finish_error(message):
@@ -1392,7 +1830,7 @@ def process(rect, pix=None, progress=None, lock=None):
 
     try:
         stage("正在截取画面……")
-        capture(rect, pix)
+        capture(rect, pix, bounds)
         if progress is not None and progress.is_cancelled():
             return
         stage("正在识别文字……")
@@ -1406,21 +1844,26 @@ def process(rect, pix=None, progress=None, lock=None):
 
         texts = [p["text"] for p in paragraphs]
         total = len(texts)
-        stage("正在翻译 0/%d……" % total)
+        translation_label = "正在本地翻译" if TRANSLATION_BACKEND == "local" else "正在翻译"
+        stage("%s 0/%d……" % (translation_label, total))
 
         def on_translate_progress(done, total_count):
             if progress is not None:
-                GLib.idle_add(lambda: progress.set_text("正在翻译 %d/%d……" % (done, total_count)) or False)
+                GLib.idle_add(lambda: progress.set_text("%s %d/%d……" % (translation_label, done, total_count)) or False)
 
         results = translate_paragraphs(texts, on_translate_progress)
         save_cache()
         if progress is not None and progress.is_cancelled():
             return
 
-        succeeded = sum(1 for r in results if r)
-        if succeeded == 0:
-            logging.warning("all %d paragraphs failed to translate", total)
-            GLib.idle_add(finish_error, "翻译服务暂时无法连接，请稍后重试。截图和文字识别已经完成。")
+        required = [i for i, text in enumerate(texts) if _needs_translation(text)]
+        succeeded = sum(1 for i in required if results[i])
+        if required and succeeded == 0:
+            logging.warning("all %d English paragraphs failed to translate", len(required))
+            message = ("本地翻译失败：%s" % (_local_error or "请检查本地模型和运行依赖。")
+                       if TRANSLATION_BACKEND == "local" else
+                       "翻译服务暂时无法连接，请稍后重试。截图和文字识别已经完成。")
+            GLib.idle_add(finish_error, message)
             return
 
         stage("正在生成翻译图片……")
@@ -1454,34 +1897,33 @@ def main():
         show_busy_dialog()
         return
 
-    # Warm the persistent HTTP sessions in the background so the first
-    # translation does not pay the multi-second TLS handshake through the
-    # desktop proxy while the user is still selecting a region.
-    for node in _ordered_nodes()[:MAX_TRANSLATE_WORKERS]:
-        _translate_executor.submit(_warm_node, node)
-
     state = load_state()
+    monitor = pointer_monitor()
+    bounds = monitor_bounds(monitor)
     forced = mode == "--select"
     rect = state.get("region")
-    if forced or not rect:
+    # A saved region on another monitor must never capture that monitor.
+    if forced or not region_within_bounds(rect, bounds):
         # Capture before showing the dark selection layer.  Otherwise the
         # overlay itself can be captured and the result appears black.
-        base = capture_screen()
+        base = capture_screen(monitor)
 
         def selected(r):
-            progress = show_progress()
+            progress = show_progress(monitor)
             threading.Thread(target=process, args=(r, base),
-                             kwargs={"progress": progress, "lock": lock}, daemon=True).start()
+                             kwargs={"progress": progress, "lock": lock,
+                                     "bounds": bounds, "monitor": monitor}, daemon=True).start()
 
-        Selector(base, selected)
+        Selector(base, selected, monitor)
         Gtk.main()
     else:
         # Capture on the main thread (Gdk is not thread-safe), then translate on
         # a worker while the progress window keeps the loop responsive.
-        base = capture_screen()
-        progress = show_progress()
+        base = capture_screen(monitor)
+        progress = show_progress(monitor)
         threading.Thread(target=process, args=(tuple(rect), base),
-                         kwargs={"progress": progress, "lock": lock}, daemon=True).start()
+                         kwargs={"progress": progress, "lock": lock,
+                                 "bounds": bounds, "monitor": monitor}, daemon=True).start()
         Gtk.main()
 
 
